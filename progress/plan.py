@@ -11,12 +11,25 @@ Two thresholds, both overridable so they can be raised as the project grows:
   fourteen roadmaps.
 * `MIN_PRS` -- the winning area must have at least this many PRs in its window. Without a floor, a
   quiet day produces a padded report about three commits.
+
+Two strategies pick the winner among the areas that clear the floor:
+
+* `busiest` (the default) -- the area with the most PRs in its window. Simple, but with dozens of
+  roadmaps it starves the rest: an area that is always second-busiest is never reported, and a new
+  roadmap never gets a first STATUS.md (twenty-one of them, 2026-09-02).
+* `rotate` -- the area whose last report landed longest ago, never-reported areas first; the PR
+  count only breaks ties. "Last report" is the newest commit touching the area's STATUS.md in the
+  roadmap checkout, and, when a state file is given, the last time this planner CHOSE the area: a
+  choice whose pull request has not landed (refused, closed, still open past the stale window)
+  would otherwise be made again and again while every other area waits. That state is the one
+  thing here a fleet cannot read from the repository, so it is optional and explicit (`--state`).
 """
 
 import datetime
 import json
 import pathlib
 import re
+import subprocess
 
 from . import files, gh, window
 from .window import CODE_REF
@@ -32,6 +45,9 @@ STALE_PR_HOURS = 8.0
 # prefix, and a squash merge carries the PR title into the commit subject, so this one string links
 # the cheap `due` check to the update mechanism.
 COMMIT_PREFIX = "progress:"
+
+STRATEGIES = ("busiest", "rotate")
+STATE_VERSION = 1
 
 STATUS_NAME = "STATUS.md"
 PROGRESS_NAME = "PROGRESS.md"
@@ -283,6 +299,81 @@ def in_flight_areas(open_prs, now=None, stale_hours=STALE_PR_HOURS, owners=None)
     return blocked, stale
 
 
+def last_report_landed(roadmap_dir, rel_dir):
+    """When the area's STATUS.md was last committed in the roadmap checkout, or None.
+
+    Read from git rather than from the file's `ts`: `ts` is the date of the TauCeti commit the report
+    describes, so two areas reported from the same documented build tie on it, while the commit date
+    says which report actually landed first. A checkout without history (or without the file) is
+    None, which `rotate` treats as never reported."""
+    status = pathlib.Path(roadmap_dir) / rel_dir / STATUS_NAME
+    if not status.is_file():
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(roadmap_dir), "log", "-1", "--format=%cI", "--", f"{rel_dir}/{STATUS_NAME}"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = (out.stdout or "").strip()
+    if out.returncode != 0 or not text:
+        return None
+    try:
+        return _parse_iso(text)
+    except ValueError:
+        return None
+
+
+def read_state(path):
+    """The rotation state file: `{"version": 1, "planned": {area: iso_ts}}`. Missing → empty; a file
+    this version does not understand is refused rather than silently treated as empty, because an
+    empty state makes every area look never-chosen and the rotation restarts from the top."""
+    if path is None:
+        return {"version": STATE_VERSION, "planned": {}}
+    p = pathlib.Path(path)
+    if not p.is_file():
+        return {"version": STATE_VERSION, "planned": {}}
+    obj = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(obj, dict) or obj.get("version") != STATE_VERSION or not isinstance(obj.get("planned"), dict):
+        raise ValueError(f"{path}: not a version-{STATE_VERSION} rotation state file")
+    return obj
+
+
+def write_state(path, state):
+    p = pathlib.Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(p)
+
+
+def _last_touched(candidate, roadmap_dir, state):
+    """The rotation key of an area: the later of its last landed report and its last choice."""
+    landed = last_report_landed(roadmap_dir, candidate["rel_dir"])
+    chosen = state.get("planned", {}).get(candidate["area"])
+    chosen = _parse_iso(chosen) if chosen else None
+    stamps = [t for t in (landed, chosen) if t is not None]
+    return max(stamps) if stamps else None
+
+
+def rank(candidates, strategy, roadmap_dir=None, state=None):
+    """Order the candidates best first under `strategy`. Deterministic: ties end on the area name."""
+    if strategy == "busiest":
+        return sorted(candidates, key=lambda c: (-len(c["prs"]), c["area"]))
+    if strategy == "rotate":
+        state = state or {"planned": {}}
+        floor = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
+        keyed = []
+        for c in candidates:
+            touched = _last_touched(c, roadmap_dir, state)
+            keyed.append(((touched or floor), -len(c["prs"]), c["area"], c))
+            c["last_touched"] = touched.isoformat() if touched else None
+        return [c for _t, _n, _a, c in sorted(keyed, key=lambda k: k[:3])]
+    raise ValueError(f"unknown strategy {strategy!r}; one of {', '.join(STRATEGIES)}")
+
+
+
 def build_plan(
     roadmap_dir,
     code_dir,
@@ -294,12 +385,19 @@ def build_plan(
     stale_hours=STALE_PR_HOURS,
     now=None,
     only_area=None,
+    strategy="busiest",
+    state_path=None,
 ):
     """The whole decision. Returns a plan dict, or raises NotDue.
 
     `commits` and `open_prs` may be supplied by the caller (the worker already holds them, and the
-    tests inject fixtures); otherwise they are fetched.
+    tests inject fixtures); otherwise they are fetched. `strategy` is one of STRATEGIES; `state_path`
+    (rotate only) is where the planner records each choice it makes, so a choice that never lands
+    still moves the rotation on.
     """
+    if strategy not in STRATEGIES:
+        raise ValueError(f"unknown strategy {strategy!r}; one of {', '.join(STRATEGIES)}")
+    state = read_state(state_path) if strategy == "rotate" else None
     now = now or _utcnow()
     commits = gh.recent_roadmap_commits() if commits is None else commits
     cadence_reason = check_cadence(commits, idle_hours=idle_hours, now=now)
@@ -423,16 +521,26 @@ def build_plan(
     if not candidates:
         raise NotDue("; ".join(skipped) or "no candidate areas")
 
-    ranked = sorted(
-        candidates,
-        key=lambda c: (-len(c["prs"]), c["area"]),
-    )
-    best = ranked[0]
-    if len(best["prs"]) < min_prs:
+    # The floor first, under either strategy: an area below it is not reportable at all, and under
+    # `rotate` the stalest area is very often a quiet one, so ranking before filtering would pick an
+    # unreportable area and then refuse, while a reportable one waited.
+    qualified = [c for c in candidates if len(c["prs"]) >= min_prs]
+    if not qualified:
+        busiest = rank(candidates, "busiest")[0]
         raise NotDue(
-            f"{cadence_reason}, but the busiest area ({best['area']}) has only "
-            f"{len(best['prs'])} PR(s) in its window (< {min_prs})"
+            f"{cadence_reason}, but the busiest area ({busiest['area']}) has only "
+            f"{len(busiest['prs'])} PR(s) in its window (< {min_prs})"
         )
+    ranked = rank(qualified, strategy, roadmap_dir=roadmap_dir, state=state)
+    best = ranked[0]
+    if strategy == "rotate":
+        since = f"last report landed {best['last_touched'][:10]}" if best.get("last_touched") else "never reported"
+        choice = f"{best['area']} is the stalest reportable area ({since}) with {len(best['prs'])} PR(s)"
+        if state_path is not None:
+            state["planned"][best["area"]] = now.isoformat(timespec="seconds")
+            write_state(state_path, state)
+    else:
+        choice = f"{best['area']} has {len(best['prs'])} PR(s)"
 
     return {
         "roadmap": best["area"],
@@ -441,17 +549,16 @@ def build_plan(
         "to_sha": to_sha,
         "prs": best["prs"],
         "bootstrapped": best["bootstrapped"],
-        "reason": (
-            f"{cadence_reason}; {best['area']} has {len(best['prs'])} PR(s) since "
-            f"{best['from_sha'][:7]}"
-        ),
+        "reason": f"{cadence_reason}; {choice} since {best['from_sha'][:7]}",
+        "strategy": strategy,
         "skipped": skipped,
         "status_path": f"{best['rel_dir']}/{STATUS_NAME}",
         "progress_path": f"{best['rel_dir']}/{PROGRESS_NAME}",
         "from_date": window.commit_date(code_dir, best["from_sha"]),
         "to_date": window.commit_date(code_dir, to_sha),
         "runner_up": [
-            {"area": c["area"], "prs": len(c["prs"])} for c in ranked[1:4]
+            {"area": c["area"], "prs": len(c["prs"]), **({"last_touched": c.get("last_touched")} if strategy == "rotate" else {})}
+            for c in ranked[1:4]
         ],
     }
 

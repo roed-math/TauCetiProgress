@@ -72,6 +72,8 @@ def cmd_plan(args):
             idle_hours=args.idle_hours,
             min_prs=args.min_prs,
             only_area=args.area,
+            strategy=args.strategy,
+            state_path=args.state,
         )
     except plan.NotDue as exc:
         print(f"not due: {exc}", file=sys.stderr)
@@ -148,6 +150,14 @@ def build_parser():
     p.add_argument("--idle-hours", type=float, default=None)
     p.add_argument("--min-prs", type=int, default=None)
     p.add_argument("--area", default=None, help="force a single area (testing)")
+    # Both default from the environment so a worker that only passes its environment through can
+    # select them without a code change of its own.
+    p.add_argument("--strategy", choices=None, default=None,
+                   help="busiest (default) or rotate: the area whose last report landed longest ago "
+                        "(env TAUCETI_PROGRESS_STRATEGY)")
+    p.add_argument("--state", default=None,
+                   help="rotate only: a JSON file where each choice is recorded, so a report that "
+                        "never lands still moves the rotation on (env TAUCETI_PROGRESS_STATE)")
     p.add_argument("--out", default=None, help="write the plan JSON here instead of stdout")
     p.set_defaults(fn=cmd_plan)
 
@@ -199,6 +209,14 @@ def main(argv=None):
         args.min_prs = plan_mod.MIN_PRS
     if getattr(args, "ref", None) is None:
         args.ref = plan_mod.CODE_REF
+    if hasattr(args, "strategy"):
+        import os
+
+        args.strategy = args.strategy or os.environ.get("TAUCETI_PROGRESS_STRATEGY") or "busiest"
+        if args.strategy not in plan_mod.STRATEGIES:
+            print(f"unknown --strategy {args.strategy!r}; one of {', '.join(plan_mod.STRATEGIES)}", file=sys.stderr)
+            return 2
+        args.state = args.state or os.environ.get("TAUCETI_PROGRESS_STATE") or None
     try:
         return args.fn(args)
     except KeyboardInterrupt:

@@ -38,6 +38,14 @@ tauceti-progress announce --section FILE  post a new section to Zulip (idempoten
 `due` is the only one that runs often; it exits 75 ("no progress") when nothing is due, matching
 the worker's convention. `plan` runs at most once a day.
 
+`plan` picks among the areas with at least `MIN_PRS` merged PRs in their window. By default it takes
+the busiest, which with dozens of roadmaps leaves the rest unreported for ever. `--strategy rotate`
+(or `TAUCETI_PROGRESS_STRATEGY=rotate`) takes instead the area whose last report landed longest
+ago, never-reported areas first, judged by the newest commit to the area's `STATUS.md` in the
+roadmap checkout. Give it `--state FILE` (or `TAUCETI_PROGRESS_STATE`) and every choice is recorded
+there too, so an area whose report was refused or never merged does not get chosen again ahead of
+the ones still waiting.
+
 ## The window cursor is a SHA, on the docs-tracking branch
 
 A window is the half-open commit range `(from_sha, to_sha]` on TauCeti's **`docgen`** branch, where

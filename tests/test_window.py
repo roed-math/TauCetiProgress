@@ -6,6 +6,7 @@ could encode the same mistake twice.
 """
 
 import datetime
+import json
 import os
 import pathlib
 import subprocess
@@ -371,7 +372,7 @@ def plan_against(code_dir, roadmap_dir, docs_sha, area_prs, **kw):
             roadmap_dir, code_dir,
             commits=[{"commit": {"committedDate": "2026-01-01T00:00:00Z"},
                       "messageHeadline": "progress: X (2026-01-01)"}],
-            open_prs=[], ref="main", min_prs=1, **kw)
+            open_prs=[], ref="main", **{"min_prs": 1, **kw})
     finally:
         plan_mod.docs_source_commit, gh_mod.merged_prs_for_area = orig_docs, orig_labels
 
@@ -436,6 +437,106 @@ def test_a_cursor_in_no_history_at_all_is_still_refused():
         raises(window.GitError,
                lambda: plan_against(code, roadmap, shas[2], {"Old": [1, 2]}),
                "not an ancestor")
+
+
+# ----- the rotate strategy ---------------------------------------------------------------------
+
+
+def commit_roadmap(root, date, subject="progress: report"):
+    """Commit everything in the roadmap checkout at `date`, so STATUS.md files carry a landed time."""
+    env = {**os.environ, "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@e",
+           "GIT_AUTHOR_DATE": date, "GIT_COMMITTER_DATE": date}
+    if not (pathlib.Path(root) / ".git").exists():
+        subprocess.run(["git", "init", "-q", "-b", "main", root], check=True, capture_output=True)
+    subprocess.run(["git", "-C", root, "add", "-A"], check=True, capture_output=True, env=env)
+    subprocess.run(["git", "-C", root, "commit", "-q", "-m", subject], check=True, capture_output=True, env=env)
+
+
+def status_for(area, sha):
+    return files.render_status(area, sha, "2026-01-01", "prose " * 60)
+
+
+def test_rotate_takes_a_never_reported_area_before_a_busier_reported_one():
+    """The starvation `busiest` has: with two reportable areas, the one that has never had a
+    STATUS.md goes first even though the other has more PRs in its window."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "a (#1)", "a (#2)", "a (#3)", "b (#4)"])
+        make_roadmap(roadmap, {"Busy": None, "New": None})
+        (pathlib.Path(roadmap) / "TauCetiRoadmap" / "Busy" / "STATUS.md").write_text(status_for("Busy", shas[0]))
+        commit_roadmap(roadmap, "2026-03-01T00:00:00Z")
+        busiest = plan_against(code, roadmap, shas[4], {"Busy": [1, 2, 3], "New": [4]})
+        rotate = plan_against(code, roadmap, shas[4], {"Busy": [1, 2, 3], "New": [4]}, strategy="rotate")
+        assert busiest["roadmap"] == "Busy", busiest["roadmap"]
+        assert rotate["roadmap"] == "New", rotate["roadmap"]
+        assert rotate["strategy"] == "rotate" and "never reported" in rotate["reason"], rotate["reason"]
+        assert rotate["runner_up"][0]["last_touched"].startswith("2026-03-01"), rotate["runner_up"]
+
+
+def test_rotate_orders_reported_areas_by_when_their_report_landed():
+    """Among reported areas the one whose STATUS.md was committed longest ago goes first, read from
+    the checkout's history rather than from the file's `ts` (which ties on the documented build)."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "a (#1)", "b (#2)", "tip"])
+        make_roadmap(roadmap, {"Older": None, "Newer": None})
+        (pathlib.Path(roadmap) / "TauCetiRoadmap" / "Older" / "STATUS.md").write_text(status_for("Older", shas[0]))
+        commit_roadmap(roadmap, "2026-02-01T00:00:00Z")
+        (pathlib.Path(roadmap) / "TauCetiRoadmap" / "Newer" / "STATUS.md").write_text(status_for("Newer", shas[0]))
+        commit_roadmap(roadmap, "2026-04-01T00:00:00Z")
+        got = plan_against(code, roadmap, shas[3], {"Older": [1], "Newer": [2]}, strategy="rotate")
+        assert got["roadmap"] == "Older", got["roadmap"]
+        assert "2026-02-01" in got["reason"], got["reason"]
+
+
+def test_rotate_state_moves_a_chosen_area_to_the_back():
+    """A choice is recorded; the same inputs next time pick the other area, because the first one's
+    last touch is now its (unlanded) choice. Without the state file the choice repeats."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap, \
+            tempfile.TemporaryDirectory() as st:
+        shas = make_repo(code, ["init", "a (#1)", "b (#2)", "tip"])
+        make_roadmap(roadmap, {"A": None, "B": None})
+        state = pathlib.Path(st) / "rotation.json"
+        first = plan_against(code, roadmap, shas[3], {"A": [1], "B": [2]}, strategy="rotate", state_path=state)
+        second = plan_against(code, roadmap, shas[3], {"A": [1], "B": [2]}, strategy="rotate", state_path=state)
+        third = plan_against(code, roadmap, shas[3], {"A": [1], "B": [2]}, strategy="rotate", state_path=state)
+        assert (first["roadmap"], second["roadmap"], third["roadmap"]) == ("A", "B", "A"), (first["roadmap"], second["roadmap"], third["roadmap"])
+        recorded = json.loads(state.read_text())
+        assert set(recorded["planned"]) == {"A", "B"} and recorded["version"] == 1, recorded
+        stateless = [plan_against(code, roadmap, shas[3], {"A": [1], "B": [2]}, strategy="rotate")["roadmap"]
+                     for _ in range(2)]
+        assert stateless == ["A", "A"], stateless
+
+
+def test_rotate_never_picks_an_area_below_the_floor():
+    """The stalest area is often a quiet one. The floor is applied first, so the pick is the stalest
+    REPORTABLE area, and when nothing clears the floor the refusal names the busiest as before."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "a (#1)", "b (#2)", "b (#3)", "tip"])
+        make_roadmap(roadmap, {"Quiet": None, "Busy": None})
+        got = plan_against(code, roadmap, shas[4], {"Quiet": [1], "Busy": [2, 3]}, strategy="rotate", min_prs=2)
+        assert got["roadmap"] == "Busy", got["roadmap"]
+        raises(plan.NotDue,
+               lambda: plan_against(code, roadmap, shas[4], {"Quiet": [1], "Busy": [2, 3]}, strategy="rotate", min_prs=3),
+               "busiest area (Busy) has only 2")
+
+
+def test_rotate_refuses_a_state_file_it_does_not_understand():
+    """An unreadable state must not be read as empty: that restarts the rotation from the top."""
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap, \
+            tempfile.TemporaryDirectory() as st:
+        shas = make_repo(code, ["init", "a (#1)"])
+        make_roadmap(roadmap, {"A": None})
+        state = pathlib.Path(st) / "rotation.json"
+        state.write_text('{"version": 99, "planned": {}}')
+        raises(ValueError, lambda: plan_against(code, roadmap, shas[1], {"A": [1]}, strategy="rotate", state_path=state),
+               "version-1")
+
+
+def test_an_unknown_strategy_is_refused():
+    with tempfile.TemporaryDirectory() as code, tempfile.TemporaryDirectory() as roadmap:
+        shas = make_repo(code, ["init", "a (#1)"])
+        make_roadmap(roadmap, {"A": None})
+        raises(ValueError, lambda: plan_against(code, roadmap, shas[1], {"A": [1]}, strategy="newest"), "unknown strategy")
 
 
 for _name, _fn in sorted(globals().items()):
