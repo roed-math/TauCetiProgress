@@ -31,12 +31,35 @@ done by tested Python too.
 tauceti-progress due                      is an update due? (one API call, no clone)
 tauceti-progress plan   --roadmap-dir DIR pick the roadmap and the PR window
 tauceti-progress facts  --plan FILE       what declarations actually landed in the window
+tauceti-progress check  --plan FILE ...   check the model's two bodies before anything is committed
 tauceti-progress apply  --plan FILE ...   write the files, open the PR (resumable)
 tauceti-progress announce --section FILE  post a new section to Zulip (idempotent)
+tauceti-progress docs-commit              the commit the published documentation describes
 ```
 
 `due` is the only one that runs often; it exits 75 ("no progress") when nothing is due, matching
 the worker's convention. `plan` runs at most once a day.
+
+### Choosing the roadmap
+
+`plan --strategy busiest` (the default) waits until no report has landed anywhere for 8 hours, then
+takes the roadmap with the most PRs in its window, if it has at least 10. With dozens of roadmaps
+this starves the quieter ones.
+
+`plan --strategy threshold` decides per roadmap instead. With N the PRs in a roadmap's window and T
+the days since its last report, a roadmap qualifies when N > 0 and either it is declared complete
+(archived under `Completed/`) or N + T > 10 (`--threshold`). One that has never been reported
+qualifies with its first PR. The merge gate's six-hour interval per roadmap still applies. Among the
+qualifying roadmaps the one with the most PRs wins. There is no project-wide cadence, so this suits
+a worker that polls for work: `--table FILE` records every roadmap's standing, including when the
+next one will qualify, and `--label-cache FILE` keeps each area's merged PRs between runs, so a run
+makes one search for what merged since the last instead of a query per area.
+
+`check` holds a report to the prompt's own limits (750 and 300 words, the two status headings), and
+refuses a documentation link that was not copied from the facts or the previous report, one whose
+declaration is no longer on its page, a layer the previous report assessed that is now
+`unassessed` against the same README, and a report that assesses no layer at all. The writing model
+is meant to run it and fix what it reports.
 
 ## The window cursor is a SHA, on the docs-tracking branch
 

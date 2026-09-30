@@ -6,7 +6,9 @@ Subcommands, in the order a round uses them:
     plan      pick the roadmap and the PR window. exit 75 when nothing qualifies.
     facts     what mathematics actually landed in the window (ground truth for the model)
     prompt    print a writing prompt for the worker to fill in and hand to a model
+    check     check the model's two bodies before anything is committed (exit 1 on a problem)
     apply     write the files and open the PR (resumable)
+    docs-commit   the TauCeti commit the published documentation describes
     announce  post a new section to Zulip (idempotent)
 
 Exit codes follow the worker's convention: 0 did something, 75 (`EX_NOPROGRESS`) nothing to do,
@@ -62,8 +64,9 @@ def cmd_due(args):
 
 
 def cmd_plan(args):
-    from . import plan
+    from . import gh, plan
 
+    cache = gh.LabelCache(args.label_cache) if args.label_cache else None
     try:
         result = plan.build_plan(
             roadmap_dir=args.roadmap_dir,
@@ -72,6 +75,10 @@ def cmd_plan(args):
             idle_hours=args.idle_hours,
             min_prs=args.min_prs,
             only_area=args.area,
+            strategy=args.strategy,
+            threshold=args.threshold,
+            table_path=args.table,
+            label_cache=cache,
         )
     except plan.NotDue as exc:
         print(f"not due: {exc}", file=sys.stderr)
@@ -104,6 +111,24 @@ def cmd_facts(args):
               f"in {len(result['files'])} file(s)")
     else:
         print(out)
+    return 0
+
+
+def cmd_check(args):
+    from . import check
+
+    return check.run(args.plan, args.facts, args.status_body, args.section_body, args.roadmap_dir,
+                     links=not args.no_links)
+
+
+def cmd_docs_commit(args):
+    from .docs import Docs, DocsError
+
+    try:
+        print(Docs(ttl=0).source_commit())
+    except DocsError as exc:
+        print(f"docs-commit: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -153,6 +178,21 @@ def build_parser():
     p.add_argument("--idle-hours", type=float, default=None)
     p.add_argument("--min-prs", type=int, default=None)
     p.add_argument("--area", default=None, help="force a single area (testing)")
+    # The next three default from the environment, so a worker that passes its environment through
+    # can select them without a code change of its own.
+    p.add_argument("--strategy", default=None,
+                   help="busiest (default): the area with the most PRs, subject to --idle-hours and "
+                        "--min-prs; threshold: per-roadmap N + T > --threshold, see plan.py "
+                        "(env TAUCETI_PROGRESS_STRATEGY)")
+    p.add_argument("--threshold", type=float, default=None,
+                   help="threshold only: the N + T a roadmap must exceed (default 10; env "
+                        "TAUCETI_PROGRESS_THRESHOLD)")
+    p.add_argument("--table", default=None,
+                   help="threshold only: write every roadmap's standing under the rule here, "
+                        "whether or not one qualifies")
+    p.add_argument("--label-cache", default=None,
+                   help="a JSON file keeping each area's merged PRs between runs, so a run asks "
+                        "GitHub only for what merged since the last (env TAUCETI_PROGRESS_LABEL_CACHE)")
     p.add_argument("--out", default=None, help="write the plan JSON here instead of stdout")
     p.set_defaults(fn=cmd_plan)
 
@@ -161,6 +201,18 @@ def build_parser():
     f.add_argument("--code-dir", required=True)
     f.add_argument("--out", default=None)
     f.set_defaults(fn=cmd_facts)
+
+    c = sub.add_parser("check", help="check the model's two bodies before anything is committed")
+    c.add_argument("--plan", required=True)
+    c.add_argument("--facts", required=True)
+    c.add_argument("--status-body", required=True)
+    c.add_argument("--section-body", required=True)
+    c.add_argument("--roadmap-dir", required=True, help="the TauCetiRoadmap checkout the plan was made from")
+    c.add_argument("--no-links", action="store_true", help="skip looking documentation links up on the site")
+    c.set_defaults(fn=cmd_check)
+
+    dc = sub.add_parser("docs-commit", help="print the commit the published documentation describes")
+    dc.set_defaults(fn=cmd_docs_commit)
 
     a = sub.add_parser("apply", help="write the files and open the PR")
     a.add_argument("--plan", required=True)
@@ -206,6 +258,18 @@ def main(argv=None):
         args.min_prs = plan_mod.MIN_PRS
     if getattr(args, "ref", None) is None:
         args.ref = plan_mod.CODE_REF
+    if args.fn is cmd_plan:
+        import os
+
+        args.strategy = args.strategy or os.environ.get("TAUCETI_PROGRESS_STRATEGY") or "busiest"
+        if args.strategy not in plan_mod.STRATEGIES:
+            print(f"unknown --strategy {args.strategy!r}; one of {', '.join(plan_mod.STRATEGIES)}",
+                  file=sys.stderr)
+            return 2
+        if args.threshold is None:
+            env = os.environ.get("TAUCETI_PROGRESS_THRESHOLD")
+            args.threshold = float(env) if env else plan_mod.THRESHOLD
+        args.label_cache = args.label_cache or os.environ.get("TAUCETI_PROGRESS_LABEL_CACHE") or None
     try:
         return args.fn(args)
     except KeyboardInterrupt:
