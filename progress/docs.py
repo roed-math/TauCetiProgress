@@ -36,6 +36,11 @@ import urllib.request
 
 DOCS_BASE = "https://taucetiproject.github.io/TauCeti/docs"
 INDEX_PATH = "declarations/declaration-data.bmp"
+# The commit the deployed tree documents. TauCeti's deploy stamps it into the tree (pages.yml, "Fold
+# the API docs into the site"), and says that anything needing certainty should read it rather than
+# the `docgen` branch, which is best-effort.
+SOURCE_SHA_PATH = "SOURCE_SHA"
+_SHA_RE = re.compile(r"\A[0-9a-f]{40}\Z")
 
 # How long a cached page may be reused across runs.
 #
@@ -83,7 +88,7 @@ class DocsNotFound(DocsError):
 class Docs:
     """A cached reader for one published documentation site."""
 
-    def __init__(self, base=DOCS_BASE, cache_dir=None, opener=None, ttl=None):
+    def __init__(self, base=DOCS_BASE, cache_dir=None, opener=None, ttl=None, accept_older=None):
         self.base = base.rstrip("/")
         self.cache_dir = pathlib.Path(
             cache_dir or os.environ.get("TAUCETI_DOCS_CACHE") or "/tmp/tauceti-docs-cache"
@@ -93,6 +98,9 @@ class Docs:
         self._index = None
         self._pages = {}
         self._source_commit = None
+        # `accept_older(page_commit, source_file, build_commit) -> bool`: may a page built at an
+        # earlier commit stand for the build? See `declarations`. None refuses every such page.
+        self.accept_older = accept_older
 
     # ----- transport -------------------------------------------------------------------------
 
@@ -227,7 +235,7 @@ class Docs:
         html = self._get(module_page)
         if self._source_commit is not None:
             seen = self._page_commit(html)
-            if seen != self._source_commit:
+            if seen != self._source_commit and not self._unchanged(seen, module_page):
                 html = self._get(module_page, refetch=True)
                 seen = self._page_commit(html)
                 if seen is None:
@@ -238,10 +246,11 @@ class Docs:
                         f"{module_page} has no source link to verify its build against "
                         f"{self._source_commit[:7]}; refusing an incoherent documentation window"
                     )
-                if seen != self._source_commit:
+                if seen != self._source_commit and not self._unchanged(seen, module_page):
                     raise DocsError(
-                        f"{module_page} was built from {seen[:7]}, not {self._source_commit[:7]}; "
-                        f"the site is redeploying and this run cannot describe one build"
+                        f"{module_page} was built from {seen[:7]}, not {self._source_commit[:7]}, and its "
+                        f"module has changed since; the site is redeploying and this run cannot "
+                        f"describe one build"
                     )
         out = {}
         marks = [(m.start(), m.group(1)) for m in _DECL_RE.finditer(html)]
@@ -262,6 +271,28 @@ class Docs:
             }
         return out
 
+    def _unchanged(self, page_commit, module_page):
+        """Does a page built at `page_commit` still describe the build? Since TauCeti#9636 the docs
+        are built incrementally: a run re-analyzes only the modules whose oleans changed, so a page
+        for a module untouched since an earlier build keeps that build's source links. Such a page is
+        exact for the current build provided the module's source file is unchanged in between, which
+        only git can say; `accept_older` (given by `facts`, which has the checkout) says it."""
+        if not page_commit or self.accept_older is None or not module_page.endswith(".html"):
+            return False
+        return bool(self.accept_older(page_commit, module_page[: -len(".html")] + ".lean", self._source_commit))
+
+    def _marker_commit(self):
+        """The commit in the deployed tree's SOURCE_SHA marker, read fresh, or None for a site that
+        has none (built before the marker existed)."""
+        try:
+            text = self._get(SOURCE_SHA_PATH, refetch=True)
+        except DocsNotFound:
+            return None
+        sha = text.strip()
+        if not _SHA_RE.match(sha):
+            raise DocsError(f"{SOURCE_SHA_PATH} does not hold a commit: {sha[:60]!r}")
+        return sha
+
     def source_commit(self, probe_module=None):
         """The TauCeti commit the published documentation was built from.
 
@@ -270,8 +301,17 @@ class Docs:
         behind the branch tip. Reporting links against the branch tip would then produce dead links
         for anything newer, so the commit stated by the documentation is what everything is anchored
         to.
+
+        The deployed tree's SOURCE_SHA marker when there is one. A module page's source links are the
+        fallback, for a site without the marker: once the docs are built incrementally, a page names
+        the build that last re-analyzed its module, which can be any earlier one (on 2026-09-30 the
+        live site's pages named four different commits).
         """
         if self._source_commit is None:
+            marked = self._marker_commit()
+            if marked is not None:
+                self._source_commit = marked
+                return marked
             module = probe_module or self._any_module()
             for info in self.declarations(module).values():
                 if info["commit"]:

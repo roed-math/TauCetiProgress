@@ -81,6 +81,29 @@ def test_source_commit_comes_from_the_page():
     assert d.source_commit() == "ed837d596f81c587c5b9696efed02a869f945e7e", d.source_commit()
 
 
+def test_source_commit_prefers_the_deployed_tree_s_marker():
+    """An incremental build's pages name the build that last re-analyzed each module, so a page is
+    no longer the build's commit; the SOURCE_SHA marker the deploy stamps into the tree is."""
+    d = make({"SOURCE_SHA": "c" * 40 + "\n", "TauCeti/Analysis/Fredholm/Basic.html": PAGE,
+              docs_mod.INDEX_PATH: INDEX})
+    assert d.source_commit() == "c" * 40, d.source_commit()
+    bad = make({"SOURCE_SHA": "<html>not found</html>", docs_mod.INDEX_PATH: INDEX})
+    try:
+        bad.source_commit()
+    except DocsError as exc:
+        assert "SOURCE_SHA" in str(exc)
+    else:
+        raise AssertionError("a marker that is not a commit must be refused, not ignored")
+
+
+def test_the_marker_is_read_fresh_whatever_the_cache_holds():
+    with tempfile.TemporaryDirectory() as tmp:
+        pages = {"SOURCE_SHA": "a" * 40}
+        make(pages, cache=tmp, ttl=3600).source_commit()
+        pages["SOURCE_SHA"] = "b" * 40
+        assert make(pages, cache=tmp, ttl=3600).source_commit() == "b" * 40
+
+
 def test_index_is_parsed_and_maps_names_to_pages():
     d = make({docs_mod.INDEX_PATH: INDEX})
     assert d.module_of("TauCeti.IsFredholm") == "TauCeti/Analysis/Fredholm/Basic.html"
@@ -293,6 +316,28 @@ def test_only_a_404_means_the_page_is_absent():
                 raise AssertionError(f"{label} must raise DocsError")
     finally:
         urllib.request.urlopen = real
+
+
+def test_an_older_page_is_accepted_only_when_accept_older_says_so():
+    asked = []
+    def accept(commit, path, build):
+        asked.append((commit, path, build))
+        return commit == OLD
+    pages = {"SOURCE_SHA": NEW, docs_mod.INDEX_PATH: TWO_PAGE_INDEX, "other.html": page_at(OLD),
+             "third.html": page_at("c" * 40)}
+    fetched = []
+    d = Docs(base="https://example.test/docs", cache_dir="/nonexistent", ttl=0, accept_older=accept,
+             opener=lambda url: fetched.append(url) or pages[url.split("/docs/", 1)[1]])
+    assert d.source_commit() == NEW
+    assert d.declarations("other.html")["A.b"]["commit"] == OLD
+    assert asked[0] == (OLD, "other.lean", NEW), asked
+    assert sum(u.endswith("other.html") for u in fetched) == 1, "an accepted page is not fetched twice"
+    try:
+        d.declarations("third.html")
+    except DocsError as exc:
+        assert "changed since" in str(exc), str(exc)
+    else:
+        raise AssertionError("a page accept_older refuses is from another build")
 
 
 def test_a_site_redeploying_under_a_run_is_refused():
