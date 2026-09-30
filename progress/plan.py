@@ -11,18 +11,38 @@ Two thresholds, both overridable so they can be raised as the project grows:
   fourteen roadmaps.
 * `MIN_PRS` -- the winning area must have at least this many PRs in its window. Without a floor, a
   quiet day produces a padded report about three commits.
+
+Both belong to the default strategy, `busiest`: the area with the most PRs in its window wins. With
+dozens of roadmaps that starves the rest, since an area that is never the busiest is never reported,
+and a new roadmap waited weeks for its first report (twenty-one of them, 2026-09-02).
+
+The `threshold` strategy replaces both thresholds with a per-roadmap rule. Let N be the number of
+PRs in a roadmap's window and T the days since its last report landed. The roadmap qualifies when
+N > 0 and either it has been declared complete (archived under `Completed/`) or N + T > `THRESHOLD`.
+A busy roadmap therefore qualifies quickly and a quiet one after a while, so none is starved. A
+roadmap that has never been reported qualifies as soon as it has one PR. Among the qualifying
+roadmaps the one with the most PRs wins. There is no project-wide cadence. The merge gate's
+per-roadmap interval (`gate.MIN_REPORT_INTERVAL_HOURS`) still holds, so the planner applies it too
+rather than choose a report the gate would refuse.
 """
 
 import datetime
 import json
+import math
 import pathlib
 import re
+import subprocess
 
 from . import files, gh, layers as layers_mod, window
+from .gate import MIN_REPORT_INTERVAL_HOURS
 from .window import CODE_REF
 
 IDLE_HOURS = 8.0
 MIN_PRS = 10
+STRATEGIES = ("busiest", "threshold")
+# `threshold`: a roadmap qualifies once N + T exceeds this (N PRs in its window, T days since its last
+# report), unless it has been declared complete, when one PR is enough.
+THRESHOLD = 10.0
 # How long an open progress pull request keeps marking its area in flight. Past this it is assumed
 # stuck rather than pending: one full cadence period is long enough for any pull request that was
 # going to merge to have merged, and the merge check re-runs on every push and on CI completing.
@@ -74,6 +94,11 @@ def discover_areas(roadmap_dir):
     their existing status files are still found, but they are excluded from selection unless new
     PRs arrive for them.
 
+    An area can exist under both parents: a completed roadmap archived and then reopened as a new
+    roadmap of the same name (IntegralLattices, 2026-09). The active one wins. It is where new work
+    under the shared label is going, and the archive is a closed record. Letting the archive win would
+    append the new roadmap's work to the archived log and judge it against the archived README.
+
     Deliberately keyed on README presence and nothing else: an area may or may not carry a
     `Suggested.lean`, the file has been renamed before, and nested sub-roadmaps (RepresentationTheory)
     have their own READMEs one level down while remaining a single labelled area.
@@ -88,8 +113,14 @@ def discover_areas(roadmap_dir):
             continue
         for child in sorted(parent.iterdir()):
             if child.is_dir() and (child / "README.md").is_file():
-                found[child.name] = f"{prefix}/{child.name}" if prefix else child.name
+                found.setdefault(child.name, f"{prefix}/{child.name}" if prefix else child.name)
     return found
+
+
+def is_complete(rel_dir):
+    """Has the roadmap at `rel_dir` been declared complete? Maintainers declare it by archiving the
+    roadmap under `Completed/`, so the directory is the declaration."""
+    return rel_dir.split("/", 1)[0] == COMPLETED_DIR
 
 
 def read_area_layers(roadmap_dir, rel_dir):
@@ -168,6 +199,83 @@ def check_cadence(commits, idle_hours=IDLE_HOURS, now=None):
     if age < idle_hours:
         raise NotDue(f"last progress update landed {age:.1f}h ago (< {idle_hours:g}h)")
     return f"last progress update landed {age:.1f}h ago"
+
+
+def last_report_at(roadmap_dir, rel_dir):
+    """When `<rel_dir>/PROGRESS.md` last changed in the roadmap checkout, or None if it never has.
+
+    This is the same reading the merge gate's collector makes on the base branch for its per-roadmap
+    interval: the committer date of the newest commit touching that file. Reading it the same way is
+    what lets the planner avoid choosing a report the gate would refuse. The checkout must be at the
+    roadmap repository's current `main`; the worker resets it there before planning.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(roadmap_dir), "log", "-1", "--format=%cI", "--", f"{rel_dir}/{PROGRESS_NAME}"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise window.GitError(f"reading when {rel_dir} was last reported failed: {exc}") from exc
+    if out.returncode != 0:
+        raise window.GitError(f"reading when {rel_dir} was last reported failed: {out.stderr.strip()}")
+    text = out.stdout.strip()
+    return _parse_iso(text) if text else None
+
+
+def assess(n_prs, last_report, complete, now, threshold=THRESHOLD,
+           min_interval_hours=MIN_REPORT_INTERVAL_HOURS):
+    """The `threshold` rule for one roadmap: `(qualifies, days, note, qualifies_from)`.
+
+    `days` is T, the days since the last report (None if there has never been one). `qualifies_from`
+    is the earliest time the roadmap would qualify with the PRs it has now, when that is known and
+    later than `now`; a caller polling for work can sleep until then. More PRs arriving (a new
+    documentation build) can only bring it forward.
+    """
+    days = None if last_report is None else (now - last_report).total_seconds() / 86400.0
+    if n_prs <= 0:
+        return False, days, "no new pull requests", None
+    gate_from = None
+    if last_report is not None and days * 24.0 < min_interval_hours:
+        gate_from = last_report + datetime.timedelta(hours=min_interval_hours)
+    if complete:
+        rule, rule_from = "declared complete", None
+    elif last_report is None:
+        rule, rule_from = "never reported", None
+    elif n_prs + days > threshold:
+        rule, rule_from = f"N+T = {n_prs + days:.1f} > {threshold:g}", None
+    else:
+        rule = f"N+T = {n_prs + days:.1f}, needs > {threshold:g}"
+        rule_from = last_report + datetime.timedelta(days=threshold - n_prs)
+    if gate_from is not None:
+        note = (f"reported {days * 24.0:.1f}h ago; the merge gate allows one report per "
+                f"{min_interval_hours:g}h ({rule})")
+        return False, days, note, max(t for t in (gate_from, rule_from) if t is not None)
+    if rule_from is not None:
+        return False, days, rule, rule_from
+    return True, days, rule, None
+
+
+def _row(area, rel_dir, n_prs, days, complete, qualifies, note, qualifies_from=None):
+    """One line of the candidate table the `threshold` strategy writes (see `write_table`)."""
+    return {
+        "area": area,
+        "rel_dir": rel_dir,
+        "prs": n_prs,
+        "days": None if days is None else round(days, 2),
+        "complete": complete,
+        "qualifies": qualifies,
+        "note": note,
+        "qualifies_from": qualifies_from.isoformat(timespec="seconds") if qualifies_from else None,
+    }
+
+
+def write_table(path, table):
+    """Write the candidate table atomically, so a reader never sees half of one."""
+    p = pathlib.Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(table, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(p)
 
 
 def area_window(repo_dir, area_prs, from_sha, to_sha):
@@ -332,15 +440,31 @@ def build_plan(
     stale_hours=STALE_PR_HOURS,
     now=None,
     only_area=None,
+    strategy="busiest",
+    threshold=THRESHOLD,
+    min_interval_hours=MIN_REPORT_INTERVAL_HOURS,
+    table_path=None,
+    label_cache=None,
 ):
     """The whole decision. Returns a plan dict, or raises NotDue.
 
     `commits` and `open_prs` may be supplied by the caller (the worker already holds them, and the
     tests inject fixtures); otherwise they are fetched.
+
+    `strategy` is one of STRATEGIES (see the module docstring). Under `threshold`, `idle_hours`,
+    `min_prs` and `commits` are unused, and `table_path`, if given, receives every roadmap's standing
+    under the rule, whether or not one qualifies; a caller polling for work reads it to know when to
+    look again. `label_cache` (a `gh.LabelCache`) answers the per-area label queries from a file kept
+    between runs instead of asking GitHub for every area each time.
     """
+    if strategy not in STRATEGIES:
+        raise ValueError(f"unknown strategy {strategy!r}; one of {', '.join(STRATEGIES)}")
     now = now or _utcnow()
-    commits = gh.recent_roadmap_commits() if commits is None else commits
-    cadence_reason = check_cadence(commits, idle_hours=idle_hours, now=now)
+    if strategy == "threshold":
+        cadence_reason = None  # no project-wide cadence: the rule is per roadmap
+    else:
+        commits = gh.recent_roadmap_commits() if commits is None else commits
+        cadence_reason = check_cadence(commits, idle_hours=idle_hours, now=now)
 
     open_prs = gh.open_progress_prs() if open_prs is None else open_prs
     blocked, stale = in_flight_areas(open_prs, now=now, stale_hours=stale_hours)
@@ -372,22 +496,28 @@ def build_plan(
 
     candidates = []
     skipped = list(stale)
+    notes = {}  # area -> why it is not a candidate, for the threshold table
+
+    def skip(area, message):
+        skipped.append(message)
+        notes[area] = message[len(area) + 2:] if message.startswith(f"{area}: ") else message
+
     for area, rel_dir in areas.items():
         if area in blocked:
-            skipped.append(f"{area}: PR #{blocked[area]['number']} is still open")
+            skip(area, f"{area}: PR #{blocked[area]['number']} is still open")
             continue
         status_text, progress_text = read_area_files(roadmap_dir, rel_dir)
         try:
             from_sha = files.cursor(progress_text) if progress_text else None
         except files.FormatError as exc:
-            skipped.append(f"{area}: unparseable PROGRESS.md ({exc})")
+            skip(area, f"{area}: unparseable PROGRESS.md ({exc})")
             continue
 
         # One label query per area. See gh.merged_prs_for_area for why attribution is per-area
         # rather than per-PR.
-        area_prs = gh.merged_prs_for_area(area)
+        area_prs = label_cache.for_area(area) if label_cache is not None else gh.merged_prs_for_area(area)
         if not area_prs:
-            skipped.append(f"{area}: no merged PRs yet")
+            skip(area, f"{area}: no merged PRs yet")
             continue
 
         bootstrapped = False
@@ -395,10 +525,10 @@ def build_plan(
             from_sha = bootstrap_from_sha(code_dir, area, area_prs, ref=ref)
             bootstrapped = True
             if from_sha is None:
-                skipped.append(f"{area}: no merged PRs yet")
+                skip(area, f"{area}: no merged PRs yet")
                 continue
         if from_sha == to_sha:
-            skipped.append(f"{area}: already at {to_sha[:7]}")
+            skip(area, f"{area}: already at {to_sha[:7]}")
             continue
 
         # An area bootstrapped from a pull request that merged after the documented build has a
@@ -419,12 +549,12 @@ def build_plan(
             # went backwards -- a rollback, or a cursor that should never have been written -- and the
             # two want different reactions from a reader, so they must not share a sentence.
             if bootstrapped:
-                skipped.append(
+                skip(area, 
                     f"{area}: its first pull request merged after the documented build "
                     f"{to_sha[:7]}; the window is not published yet"
                 )
             else:
-                skipped.append(
+                skip(area, 
                     f"{area}: its recorded cursor {from_sha[:7]} is AHEAD of the documented build "
                     f"{to_sha[:7]} — the documentation went backwards, or that cursor is wrong; "
                     f"waiting rather than reporting a backwards window"
@@ -443,7 +573,7 @@ def build_plan(
         # way.
         fresh = area_window(code_dir, area_prs, from_sha, to_sha)
         if not fresh:
-            skipped.append(f"{area}: nothing new since {from_sha[:7]}")
+            skip(area, f"{area}: nothing new since {from_sha[:7]}")
             continue
 
         candidates.append(
@@ -458,19 +588,28 @@ def build_plan(
             }
         )
 
-    if not candidates:
-        raise NotDue("; ".join(skipped) or "no candidate areas")
+    if label_cache is not None:
+        label_cache.save()
 
-    ranked = sorted(
-        candidates,
-        key=lambda c: (-len(c["prs"]), c["area"]),
-    )
-    best = ranked[0]
-    if len(best["prs"]) < min_prs:
-        raise NotDue(
-            f"{cadence_reason}, but the busiest area ({best['area']}) has only "
-            f"{len(best['prs'])} PR(s) in its window (< {min_prs})"
+    if strategy == "threshold":
+        best, ranked, reason = _choose_by_threshold(
+            areas, candidates, notes, roadmap_dir, to_sha, now, threshold, min_interval_hours, table_path
         )
+    else:
+        if not candidates:
+            raise NotDue("; ".join(skipped) or "no candidate areas")
+
+        ranked = sorted(
+            candidates,
+            key=lambda c: (-len(c["prs"]), c["area"]),
+        )
+        best = ranked[0]
+        if len(best["prs"]) < min_prs:
+            raise NotDue(
+                f"{cadence_reason}, but the busiest area ({best['area']}) has only "
+                f"{len(best['prs'])} PR(s) in its window (< {min_prs})"
+            )
+        reason = f"{cadence_reason}; {best['area']} has {len(best['prs'])} PR(s) since {best['from_sha'][:7]}"
     area_layers, area_readme_sha = read_area_layers(roadmap_dir, best["rel_dir"])
     sub_roadmaps = read_sub_roadmaps(roadmap_dir, best["area"], best["rel_dir"])
 
@@ -484,10 +623,8 @@ def build_plan(
         "to_sha": to_sha,
         "prs": best["prs"],
         "bootstrapped": best["bootstrapped"],
-        "reason": (
-            f"{cadence_reason}; {best['area']} has {len(best['prs'])} PR(s) since "
-            f"{best['from_sha'][:7]}"
-        ),
+        "reason": reason,
+        "strategy": strategy,
         "skipped": skipped,
         "status_path": f"{best['rel_dir']}/{STATUS_NAME}",
         "progress_path": f"{best['rel_dir']}/{PROGRESS_NAME}",
@@ -497,6 +634,72 @@ def build_plan(
             {"area": c["area"], "prs": len(c["prs"])} for c in ranked[1:4]
         ],
     }
+
+
+def _choose_by_threshold(areas, candidates, notes, roadmap_dir, to_sha, now, threshold,
+                         min_interval_hours, table_path):
+    """The `threshold` strategy's choice: `(best, ranked, reason)`, or NotDue.
+
+    Every roadmap gets a row in the table, the ones that are not candidates at all (in flight,
+    nothing new, not yet documented) with the reason, so the table accounts for the whole project.
+    It is written before NotDue is raised: "nothing qualifies, and this is when something will" is
+    exactly what a caller polling for work needs to know.
+    """
+    by_area = {c["area"]: c for c in candidates}
+    rows, qualifying = [], []
+    for area, rel_dir in areas.items():
+        complete = is_complete(rel_dir)
+        last = last_report_at(roadmap_dir, rel_dir)
+        c = by_area.get(area)
+        if c is None:
+            days = None if last is None else (now - last).total_seconds() / 86400.0
+            rows.append(_row(area, rel_dir, 0, days, complete, False, notes.get(area, "not a candidate")))
+            continue
+        ok, days, note, qualifies_from = assess(
+            len(c["prs"]), last, complete, now, threshold=threshold, min_interval_hours=min_interval_hours
+        )
+        c["days"] = days
+        c["note"] = note
+        rows.append(_row(area, rel_dir, len(c["prs"]), days, complete, ok, note, qualifies_from))
+        if ok:
+            qualifying.append(c)
+
+    # Most PRs first; among equals the one reported longest ago (never reported counts as longest),
+    # then by name so the choice is deterministic.
+    ranked = sorted(
+        qualifying,
+        key=lambda c: (-len(c["prs"]), -(math.inf if c["days"] is None else c["days"]), c["area"]),
+    )
+    order = {c["area"]: i for i, c in enumerate(ranked)}
+    rows.sort(key=lambda r: (r["area"] not in order, order.get(r["area"], 0), -r["prs"], r["area"]))
+    upcoming = [r["qualifies_from"] for r in rows if r["qualifies_from"]]
+    table = {
+        "version": 1,
+        "strategy": "threshold",
+        "threshold": threshold,
+        "min_interval_hours": min_interval_hours,
+        "generated_at": now.isoformat(timespec="seconds"),
+        "to_sha": to_sha,
+        "chosen": ranked[0]["area"] if ranked else None,
+        "next_qualifies_at": min(upcoming) if upcoming else None,
+        "rows": rows,
+    }
+    if table_path:
+        write_table(table_path, table)
+    if not ranked:
+        waiting = sorted((r for r in rows if r["prs"] > 0), key=lambda r: (-(r["prs"] + (r["days"] or 0)), r["area"]))
+        closest = ", ".join(f"{r['area']} ({r['note']})" for r in waiting[:3])
+        raise NotDue(
+            f"no roadmap qualifies yet: {len(waiting)} have new pull requests"
+            + (f"; closest: {closest}" if closest else "")
+        )
+    best = ranked[0]
+    since = "never reported" if best["days"] is None else f"last reported {best['days']:.1f} days ago"
+    reason = (
+        f"{best['area']} has {len(best['prs'])} PR(s) since {best['from_sha'][:7]}, {since} "
+        f"({best['note']}); the most PRs of {len(ranked)} qualifying roadmap(s)"
+    )
+    return best, ranked, reason
 
 
 def plan_json(plan):

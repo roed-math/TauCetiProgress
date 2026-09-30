@@ -14,7 +14,10 @@ Two design points worth stating, because both were defects in an earlier draft:
 """
 
 import base64
+import datetime
 import json
+import os
+import pathlib
 import subprocess
 import time
 
@@ -99,6 +102,117 @@ def merged_prs_for_area(area, repo=CODE_REPO):
         raise GhError(f"could not parse gh pr list output: {exc}") from exc
     return sorted((int(r["number"]) for r in rows), reverse=True)
 
+
+
+def merged_prs_since(since, repo=CODE_REPO, limit=1000):
+    """`{number: [label, ...]}` for PRs merged at or after `since` (a UTC datetime). One search, which
+    GitHub caps at `limit` results; the caller must treat a full page as "possibly more"."""
+    stamp = since.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = gh([
+        "pr", "list", "--repo", repo, "--state", "merged", "--search", f"merged:>={stamp}",
+        "--limit", str(int(limit)), "--json", "number,labels",
+    ])
+    try:
+        rows = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise GhError(f"could not parse gh pr list output: {exc}") from exc
+    return {int(r["number"]): [lb.get("name") or "" for lb in r.get("labels") or []] for r in rows}
+
+
+class LabelCache:
+    """`merged_prs_for_area`, answered from a file kept between runs.
+
+    A planner run asks for every area's merged PRs, one paginated query per area: about a hundred
+    requests for fifty-odd roadmaps. That is fine every eight hours and wasteful for a caller that
+    polls for work every few minutes. So the answers are kept, and each later run makes ONE search for
+    the PRs merged since the last one and files them under their labels.
+
+    Two things the incremental search cannot see: a label removed from a PR after it merged, and a
+    label added to one that merged before the last search. Both are rare, and neither is permanent:
+    the whole cache is refetched once `FULL_EVERY_HOURS` have passed, and whenever the search comes
+    back full (more merged since the last run than one search returns).
+
+    Only merged PRs are cached, and a merge is final, so a stale entry can only be a relabelling. A
+    cache file this version does not understand is discarded and refetched, never trusted.
+    """
+
+    VERSION = 1
+    FULL_EVERY_HOURS = 24.0
+    # The search is by merge time at one-second precision; the margin absorbs clock skew between this
+    # host and GitHub and a merge that was being recorded while the last search ran.
+    MARGIN = datetime.timedelta(hours=1)
+    SEARCH_LIMIT = 1000
+
+    def __init__(self, path, repo=CODE_REPO, now=None, since_fn=None, area_fn=None):
+        self.path = pathlib.Path(path)
+        self.repo = repo
+        self.now = now or datetime.datetime.now(datetime.timezone.utc)
+        self._since_fn = since_fn or merged_prs_since
+        self._area_fn = area_fn or merged_prs_for_area
+        self._synced = False
+        self.data = self._load()
+
+    def _fresh(self):
+        return {"version": self.VERSION, "repo": self.repo, "full_at": self.now.isoformat(timespec="seconds"),
+                "synced_at": self.now.isoformat(timespec="seconds"), "areas": {}}
+
+    def _load(self):
+        try:
+            obj = json.loads(self.path.read_text(encoding="utf-8"))
+            full_at = datetime.datetime.fromisoformat(obj["full_at"])
+            datetime.datetime.fromisoformat(obj["synced_at"])
+            ok = (obj.get("version") == self.VERSION and obj.get("repo") == self.repo
+                  and isinstance(obj.get("areas"), dict)
+                  and 0 <= (self.now - full_at).total_seconds() < self.FULL_EVERY_HOURS * 3600)
+        except (OSError, ValueError, KeyError, TypeError):
+            ok = False
+        if not ok:
+            self._synced = True  # every area will be fetched in full this run; there is nothing to catch up
+            return self._fresh()
+        return obj
+
+    def _sync(self):
+        """Fold the PRs merged since the last run into the cached areas, once per run."""
+        if self._synced:
+            return
+        self._synced = True
+        since = datetime.datetime.fromisoformat(self.data["synced_at"]) - self.MARGIN
+        started = self.now
+        merged = self._since_fn(since, repo=self.repo, limit=self.SEARCH_LIMIT)
+        if len(merged) >= self.SEARCH_LIMIT:
+            # More than one search holds: start over, fetching every area in full as it is asked for.
+            self.data = self._fresh()
+            return
+        areas = self.data["areas"]
+        for number, labels in merged.items():
+            for label in labels:
+                if not label.startswith(ROADMAP_LABEL_PREFIX) or label in NON_AREA_LABELS:
+                    continue
+                area = label[len(ROADMAP_LABEL_PREFIX):]
+                if area in areas and number not in areas[area]:
+                    areas[area] = sorted(set(areas[area]) | {number}, reverse=True)
+        self.data["synced_at"] = started.isoformat(timespec="seconds")
+
+    def for_area(self, area):
+        """Every merged PR number labelled `roadmap/<area>`, newest first (as `merged_prs_for_area`)."""
+        self._sync()
+        areas = self.data["areas"]
+        if area not in areas:
+            # First sight of this area (or a fresh cache): fetch it in full. That fetch is current, so
+            # it needs nothing from the search, and later searches keep it up to date.
+            areas[area] = list(self._area_fn(area, repo=self.repo))
+        return list(areas[area])
+
+    def save(self):
+        """Write the cache back. Best effort: a cache that cannot be written costs the next run a full
+        fetch, not a wrong answer."""
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(self.path.name + f".{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(self.data, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+            tmp.replace(self.path)
+        except OSError:
+            pass
 
 def pr_details(numbers, repo=CODE_REPO):
     """`[{number, title, body, merged_at, url}]` for an explicit set of PR numbers.
