@@ -122,6 +122,20 @@ def docstring_in(text, start_line, end_line):
     return _first_sentence(" ".join(body.split()))
 
 
+def unchanged_since(repo_dir):
+    """`accept_older` for `Docs`: a page built at `commit` stands for `build` when `commit` is an
+    ancestor of `build` and `path` is unchanged between them. Its line spans are then the lines at
+    `build`, which is where `collect` blames them. Anything git cannot confirm is refused."""
+    def ok(commit, path, build):
+        try:
+            if not (window.has_commit(repo_dir, commit) and window.is_ancestor(repo_dir, commit, build)):
+                return False
+            return not window.git(["diff", "--name-only", commit, build, "--", path], repo_dir).strip()
+        except window.GitError:
+            return False
+    return ok
+
+
 def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
     """The factual spine of a window.
 
@@ -131,7 +145,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
     """
     from .docs import Docs, DocsError, DocsNotFound
 
-    docs = docs or Docs()
+    docs = docs or Docs(accept_older=unchanged_since(repo_dir))
     try:
         docs_sha = docs.source_commit()
     except DocsError as exc:

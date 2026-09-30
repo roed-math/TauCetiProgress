@@ -120,6 +120,16 @@ end TauCeti
 """
 
 
+def site(pages, base):
+    """A transport serving `pages`, answering 404 (as the real site does) for anything else."""
+    def opener(url):
+        rel = url.removeprefix(base + "/")
+        if rel not in pages:
+            raise DocsNotFound(f"{url} does not exist (HTTP 404)")
+        return pages[rel]
+    return opener
+
+
 def repo_with_two_prs(tmp):
     """Root, then a PR adding `alpha`, then a PR adding `beta` to the same file."""
     subprocess.run(["git", "init", "-q", "-b", "main", tmp], check=True, capture_output=True)
@@ -252,7 +262,7 @@ def test_an_empty_page_from_another_build_refuses_a_partial_report():
             "TauCeti/B.html": b_nav(third),
         }
         docs = Docs(base=base, cache_dir=pathlib.Path(tmp) / "cache",
-                    opener=lambda url: pages[url.removeprefix(base + "/")])
+                    opener=site(pages, base))
         assert docs.source_commit() == third  # caches the probe page from this build
         pages["TauCeti/B.html"] = b_nav("b" * 40)
         try:
@@ -282,10 +292,56 @@ def test_a_genuinely_empty_module_does_not_block_another_declaration():
             "TauCeti/B.html": (f'<p class="gh_nav_link"><a href="{b_link}">source</a></p>'),
         }
         docs = Docs(base=base, cache_dir=pathlib.Path(tmp) / "cache",
-                    opener=lambda url: pages[url.removeprefix(base + "/")])
+                    opener=site(pages, base))
         got = facts.collect(tmp, root, third, docs=docs)
         assert [d["name"] for d in got["declarations"]] == ["TauCeti.alpha"]
         assert got["counts"]["files"] == 2
+
+
+def _incremental_site(tmp, a_commit, build):
+    """A deployed tree marked as documenting `build`, whose page for TauCeti/A.lean was built at
+    `a_commit` (an incremental build that did not re-analyze A), and whose page for B was rebuilt."""
+    base = "https://docs.example/docs"
+    a_link = f"https://github.com/TauCetiProject/TauCeti/blob/{a_commit}/TauCeti/A.lean#L2-L3"
+    b_link = f"https://github.com/TauCetiProject/TauCeti/blob/{build}/TauCeti/B.lean#L1-L1"
+    pages = {
+        "SOURCE_SHA": build + "\n",
+        INDEX_PATH: json.dumps({"declarations": {
+            "TauCeti.alpha": {"docLink": "./TauCeti/A.html#TauCeti.alpha"},
+            "TauCeti.gamma": {"docLink": "./TauCeti/B.html#TauCeti.gamma"}}}),
+        "TauCeti/A.html": (f'<div class="decl" id="TauCeti.alpha"><span class="decl_kind">theorem</span>'
+                           f'<div class="gh_link"><a href="{a_link}">source</a></div></div>'),
+        "TauCeti/B.html": (f'<div class="decl" id="TauCeti.gamma"><span class="decl_kind">theorem</span>'
+                           f'<div class="gh_link"><a href="{b_link}">source</a></div></div>'),
+    }
+    return Docs(base=base, cache_dir=pathlib.Path(tmp) / "cache", opener=site(pages, base),
+                accept_older=facts.unchanged_since(tmp))
+
+
+def test_an_incremental_build_s_older_page_for_an_unchanged_module_is_used():
+    """Since TauCeti#9636 a module page keeps the commit of the build that last re-analyzed it. When
+    its file is unchanged since, its spans are the build's, and refusing it refused every window."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, _second = repo_with_two_prs(tmp)
+        tip = commit(tmp, "feat: gamma (#103)", {"TauCeti/B.lean": "theorem gamma : True := trivial\n"})
+        got = facts.collect(tmp, root, tip, pr_numbers=[101, 103],
+                            docs=_incremental_site(tmp, _second, tip))
+        by = {d["name"]: d["pr"] for d in got["declarations"]}
+        assert by == {"TauCeti.alpha": 101, "TauCeti.gamma": 103}, by
+        assert got["docs_sha"] == tip
+
+
+def test_an_older_page_for_a_module_changed_since_is_refused():
+    """A page from an earlier build whose file HAS changed since would put its spans on other lines."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        tip = commit(tmp, "feat: gamma (#103)", {"TauCeti/B.lean": "theorem gamma : True := trivial\n"})
+        try:
+            facts.collect(tmp, root, tip, docs=_incremental_site(tmp, first, tip))
+        except FactsError as exc:
+            assert "TauCeti/A.lean" in str(exc) and "changed since" in str(exc), str(exc)
+        else:
+            raise AssertionError("A.lean changed after the page's build; its spans cannot be trusted")
 
 
 def test_a_page_that_cannot_be_read_refuses_the_window():
