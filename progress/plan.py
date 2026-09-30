@@ -467,7 +467,15 @@ def build_plan(
         cadence_reason = check_cadence(commits, idle_hours=idle_hours, now=now)
 
     open_prs = gh.open_progress_prs() if open_prs is None else open_prs
-    blocked, stale = in_flight_areas(open_prs, now=now, stale_hours=stale_hours)
+    # Under `threshold`, anyone's fresh report holds its area, not only the organisation's and ours.
+    # `busiest` writes one report per eight hours, so ignoring a stranger's costs little; a worker that
+    # polls for work would otherwise write a duplicate of every report another operator has just
+    # opened (six of them on 2026-09-30, within half an hour). Staleness still applies, so a report
+    # nobody lands holds its area for `stale_hours` and no longer.
+    owners = None
+    if strategy == "threshold":
+        owners = {_pr_owner(p) for p in open_prs} - {""}
+    blocked, stale = in_flight_areas(open_prs, now=now, stale_hours=stale_hours, owners=owners)
 
     areas = discover_areas(roadmap_dir)
     if only_area:
