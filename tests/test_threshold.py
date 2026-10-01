@@ -74,9 +74,23 @@ def test_a_complete_roadmap_needs_only_one_pr():
     assert ok and note == "declared complete"
 
 
-def test_a_never_reported_roadmap_needs_only_one_pr():
-    ok, days, note, _ = plan.assess(1, None, False, NOW)
-    assert ok and days is None and note == "never reported"
+def test_an_unassessed_roadmap_needs_only_one_pr():
+    ok, days, note, _ = plan.assess(1, ago(days=1), False, NOW, unassessed="Area's README changed since its report")
+    assert ok and note == "not yet assessed: Area's README changed since its report", note
+    ok, *_ = plan.assess(1, ago(days=1), False, NOW)
+    assert not ok, "the same roadmap, assessed, waits for N + T > 10"
+
+
+def test_a_never_reported_roadmap_counts_t_from_its_readme():
+    ok, days, note, _ = plan.assess(3, None, False, NOW, unassessed="no report yet", added=ago(days=20))
+    assert ok and abs(days - 20) < 1e-9 and "no report yet" in note, (ok, days, note)
+    ok, days, _note, _ = plan.assess(1, None, False, NOW, unassessed="no report yet")
+    assert ok and days is None
+
+
+def test_the_gate_interval_holds_for_an_unassessed_roadmap_too():
+    ok, _days, note, when = plan.assess(5, ago(hours=1), False, NOW, unassessed="README changed")
+    assert not ok and "merge gate" in note and when == ago(hours=1) + datetime.timedelta(hours=6), (note, when)
 
 
 def test_the_gate_interval_holds_for_every_roadmap():
@@ -145,9 +159,10 @@ def test_last_report_is_the_newest_commit_touching_progress_md():
 # ----- _choose_by_threshold: ranking and the table ---------------------------------------------
 
 
-def _candidate(area, n, rel_dir=None):
+def _candidate(area, n, rel_dir=None, status="a report"):
+    """A candidate whose README (no layer headings in `_setup`) counts as assessed by any report."""
     return {"area": area, "rel_dir": rel_dir or f"TauCetiRoadmap/{area}", "from_sha": "a" * 40,
-            "prs": list(range(n)), "bootstrapped": False}
+            "prs": list(range(n)), "bootstrapped": False, "status_text": status}
 
 
 def _setup(reports):
@@ -163,16 +178,27 @@ def _setup(reports):
     return repo, areas
 
 
-def test_the_most_prs_wins_among_the_qualifying():
+def test_the_largest_n_plus_t_wins_among_the_qualifying():
     repo, areas = _setup([("Busy", "TauCetiRoadmap/Busy", 0.1),     # 40 PRs but reported 2.4 h ago
-                          ("Big", "TauCetiRoadmap/Big", 3.0),       # 30 PRs
-                          ("Old", "TauCetiRoadmap/Old", 20.0),      # 5 PRs, 20 days
+                          ("Big", "TauCetiRoadmap/Big", 3.0),       # 30 PRs + 3 days = 33
+                          ("Old", "TauCetiRoadmap/Old", 40.0),      # 5 PRs + 40 days = 45
                           ("Small", "TauCetiRoadmap/Small", 1.0)])  # 3 PRs, 1 day: 4 < 10
     cands = [_candidate("Busy", 40), _candidate("Big", 30), _candidate("Old", 5), _candidate("Small", 3)]
     best, ranked, reason = plan._choose_by_threshold(areas, cands, {}, repo, "b" * 40, NOW, 10.0, 6.0, None)
-    assert best["area"] == "Big", best["area"]
-    assert [c["area"] for c in ranked] == ["Big", "Old"]
-    assert "Big has 30 PR(s)" in reason and "2 qualifying" in reason, reason
+    assert best["area"] == "Old", best["area"]
+    assert [c["area"] for c in ranked] == ["Old", "Big"]
+    assert "Old has 5 PR(s)" in reason and "N+T (45.0)" in reason and "2 qualifying" in reason, reason
+
+
+def test_an_unassessed_roadmap_qualifies_and_ranks_by_n_plus_t():
+    repo, areas = _setup([("Stale", "TauCetiRoadmap/Stale", 2.0), ("New", "TauCetiRoadmap/New", None),
+                          ("Quiet", "TauCetiRoadmap/Quiet", 1.0)])
+    cands = [_candidate("Stale", 2, status=None), _candidate("New", 1, status=None), _candidate("Quiet", 2)]
+    best, ranked, _ = plan._choose_by_threshold(areas, cands, {}, repo, "b" * 40, NOW, 10.0, 6.0, None)
+    # New was added 90 days ago (its README's commit in `_setup`), so its N + T is 91; Stale's is 4.
+    assert [c["area"] for c in ranked] == ["New", "Stale"], [c["area"] for c in ranked]
+    assert "never reported, added 90.0 days ago" in plan._choose_by_threshold(
+        areas, cands, {}, repo, "b" * 40, NOW, 10.0, 6.0, None)[2]
 
 
 def test_ties_go_to_the_roadmap_reported_longest_ago():
@@ -242,6 +268,54 @@ def test_under_threshold_anyone_s_fresh_report_holds_its_area():
     finally:
         (plan.docs_source_commit, window_mod.head_sha, window_mod.is_ancestor, plan.area_window,
          gh.merged_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date) = saved
+
+
+# ----- assessment_gap: what the Progress page shows as unassessed --------------------------------
+
+
+README_WITH_LAYERS = "# Area\n\n## Layer 0: foundations\n\n## Layer 1: the summit\n"
+
+
+def _status_for(readme, roadmap="Area"):
+    from progress import layers as layers_mod
+    header = {"roadmap": roadmap, "to_sha": "b" * 40, "readme_sha": layers_mod.readme_sha(readme),
+              "layers": [{"id": "Layer 0", "state": "done"}, {"id": "Layer 1", "state": "partial"}]}
+    return f"<!--tauceti-coverage:v1 {json.dumps(header)}-->\n# Status: {roadmap}\n"
+
+
+def test_assessment_gap_reads_the_coverage_header_against_the_readme():
+    repo = _roadmap_repo()
+    _commit(repo, "TauCetiRoadmap/Area/README.md", README_WITH_LAYERS, ago(days=30))
+    assert plan.assessment_gap(repo, "Area", "TauCetiRoadmap/Area", None) == "no report yet"
+    assert plan.assessment_gap(repo, "Area", "TauCetiRoadmap/Area", "# Status\nprose only\n") == \
+        "its report does not assess Area"
+    assert plan.assessment_gap(repo, "Area", "TauCetiRoadmap/Area", _status_for(README_WITH_LAYERS)) is None
+    _commit(repo, "TauCetiRoadmap/Area/README.md", README_WITH_LAYERS + "\nA clarification.\n", ago(days=1))
+    assert plan.assessment_gap(repo, "Area", "TauCetiRoadmap/Area", _status_for(README_WITH_LAYERS)) == \
+        "Area's README changed since its report"
+
+
+def test_assessment_gap_covers_every_sub_roadmap():
+    repo = _roadmap_repo()
+    _commit(repo, "TauCetiRoadmap/Area/README.md", "# Area\n\nAn index.\n", ago(days=30))
+    _commit(repo, "TauCetiRoadmap/Area/Sub/README.md", README_WITH_LAYERS, ago(days=30))
+    _commit(repo, "TauCetiRoadmap/Area/Sub/Suggested.lean", "-- sub\n", ago(days=30))
+    assert plan.assessment_gap(repo, "Area", "TauCetiRoadmap/Area", "# Status\n") == \
+        "its report does not assess Area/Sub"
+    assert plan.assessment_gap(repo, "Area", "TauCetiRoadmap/Area", _status_for(README_WITH_LAYERS, "Area/Sub")) is None
+
+
+def test_a_roadmap_without_layers_counts_as_assessed_by_any_report():
+    repo = _roadmap_repo()
+    _commit(repo, "TauCetiRoadmap/Area/README.md", "# Area\n\nNo layer headings.\n", ago(days=30))
+    assert plan.assessment_gap(repo, "Area", "TauCetiRoadmap/Area", "# Status\nprose\n") is None
+
+
+def test_roadmap_added_at_is_the_readme_s_first_commit():
+    repo = _roadmap_repo()
+    _commit(repo, "TauCetiRoadmap/Area/README.md", "# Area\n", ago(days=50))
+    _commit(repo, "TauCetiRoadmap/Area/README.md", "# Area, edited\n", ago(days=2))
+    assert plan.roadmap_added_at(repo, "TauCetiRoadmap/Area") == ago(days=50)
 
 
 # ----- LabelCache -----------------------------------------------------------------------------
