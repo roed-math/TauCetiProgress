@@ -47,13 +47,15 @@ takes the roadmap with the most PRs in its window, if it has at least 10. With d
 this starves the quieter ones.
 
 `plan --strategy threshold` decides per roadmap instead. With N the PRs in a roadmap's window and T
-the days since its last report, a roadmap qualifies when N > 0 and either it is declared complete
-(archived under `Completed/`) or N + T > 10 (`--threshold`). One that has never been reported
-qualifies with its first PR. The merge gate's six-hour interval per roadmap still applies. Among the
-qualifying roadmaps the one with the most PRs wins. There is no project-wide cadence, so this suits
-a worker that polls for work: `--table FILE` records every roadmap's standing, including when the
-next one will qualify, and `--label-cache FILE` keeps each area's merged PRs between runs, so a run
-makes one search for what merged since the last instead of a query per area.
+the days since its last report (since its README was added, if it has never been reported), a
+roadmap qualifies when N > 0 and one of these holds: it is declared complete (archived under
+`Completed/`), N + T > 10 (`--threshold`), or it is not yet assessed, meaning it has no report, or
+its report carries no coverage header bound to the README as it now stands (for it and each
+sub-roadmap). The merge gate's six-hour interval per roadmap still applies. Among the qualifying
+roadmaps the one with the largest N + T wins. There is no project-wide cadence, so this suits a
+worker that polls for work: `--table FILE` records every roadmap's standing, including when the next
+one will qualify, and `--label-cache FILE` keeps each area's merged PRs between runs, so a run makes
+one search for what merged since the last instead of a query per area.
 
 `check` holds a report to the prompt's own limits (750 and 300 words, the two status headings), and
 refuses a documentation link that was not copied from the facts or the previous report, one whose

@@ -17,18 +17,19 @@ dozens of roadmaps that starves the rest, since an area that is never the busies
 and a new roadmap waited weeks for its first report (twenty-one of them, 2026-09-02).
 
 The `threshold` strategy replaces both thresholds with a per-roadmap rule. Let N be the number of
-PRs in a roadmap's window and T the days since its last report landed. The roadmap qualifies when
-N > 0 and either it has been declared complete (archived under `Completed/`) or N + T > `THRESHOLD`.
-A busy roadmap therefore qualifies quickly and a quiet one after a while, so none is starved. A
-roadmap that has never been reported qualifies as soon as it has one PR. Among the qualifying
-roadmaps the one with the most PRs wins. There is no project-wide cadence. The merge gate's
-per-roadmap interval (`gate.MIN_REPORT_INTERVAL_HOURS`) still holds, so the planner applies it too
-rather than choose a report the gate would refuse.
+PRs in a roadmap's window and T the days since its last report landed (for a roadmap never reported,
+since its README was added). The roadmap qualifies when N > 0 and one of these holds: it has been
+declared complete (archived under `Completed/`), N + T > `THRESHOLD`, or it is not yet assessed (see
+`assessment_gap`: no report, or a report that does not assess its README as it now stands). A busy
+roadmap therefore qualifies quickly and a quiet one after a while, so none is starved, and one the
+Progress page shows as unassessed qualifies with its next PR. Among the qualifying roadmaps the one
+with the largest N + T wins. There is no project-wide cadence. The merge gate's per-roadmap interval
+(`gate.MIN_REPORT_INTERVAL_HOURS`) still holds, so the planner applies it too rather than choose a
+report the gate would refuse.
 """
 
 import datetime
 import json
-import math
 import pathlib
 import re
 import subprocess
@@ -222,30 +223,75 @@ def last_report_at(roadmap_dir, rel_dir):
     return _parse_iso(text) if text else None
 
 
+def roadmap_added_at(roadmap_dir, rel_dir):
+    """When `<rel_dir>/README.md` was first committed at that path, or None: the start of T for a
+    roadmap that has never been reported."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(roadmap_dir), "log", "--diff-filter=A", "--format=%cI", "--",
+             f"{rel_dir}/README.md"],
+            capture_output=True, text=True, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = out.stdout.strip().splitlines() if out.returncode == 0 else []
+    return _parse_iso(lines[-1]) if lines else None
+
+
+def assessment_gap(roadmap_dir, area, rel_dir, status_text):
+    """Why the roadmap counts as not yet assessed, or None when its latest report assesses it.
+
+    The Progress page shows a roadmap's layers as unassessed unless its STATUS.md carries a coverage
+    header bound to the README as it now stands (`readme_sha`), so the same test is applied here: no
+    report at all, or no header for the roadmap (or one of its sub-roadmaps), or a header made against
+    a README that has since changed. A roadmap whose README names no layers has nothing to assess,
+    so any report counts."""
+    if not status_text:
+        return "no report yet"
+    own_layers, own_sha = read_area_layers(roadmap_dir, rel_dir)
+    needed = ([(area, own_sha)] if own_layers else []) + [
+        (sub["roadmap"], sub["readme_sha"]) for sub in read_sub_roadmaps(roadmap_dir, area, rel_dir)
+    ]
+    try:
+        headers = {h.get("roadmap"): h for h in files.parse_headers(status_text, files.COVERAGE_MARKER)}
+    except files.FormatError:
+        return "its report's coverage header cannot be read"
+    for roadmap, sha in needed:
+        header = headers.get(roadmap)
+        if header is None:
+            return f"its report does not assess {roadmap}"
+        if header.get("readme_sha") != sha:
+            return f"{roadmap}'s README changed since its report"
+    return None
+
+
 def assess(n_prs, last_report, complete, now, threshold=THRESHOLD,
-           min_interval_hours=MIN_REPORT_INTERVAL_HOURS):
+           min_interval_hours=MIN_REPORT_INTERVAL_HOURS, unassessed=None, added=None):
     """The `threshold` rule for one roadmap: `(qualifies, days, note, qualifies_from)`.
 
-    `days` is T, the days since the last report (None if there has never been one). `qualifies_from`
-    is the earliest time the roadmap would qualify with the PRs it has now, when that is known and
-    later than `now`; a caller polling for work can sleep until then. More PRs arriving (a new
-    documentation build) can only bring it forward.
+    `days` is T: the days since the last report, or for a roadmap never reported since `added` (its
+    README's first commit), or None if neither is known. `unassessed` is `assessment_gap`'s reason,
+    or None for an assessed roadmap. `qualifies_from` is the earliest time the roadmap would qualify
+    with the PRs it has now, when that is known and later than `now`; a caller polling for work can
+    sleep until then. More PRs arriving (a new documentation build) can only bring it forward.
     """
-    days = None if last_report is None else (now - last_report).total_seconds() / 86400.0
+    since = last_report if last_report is not None else added
+    days = None if since is None else (now - since).total_seconds() / 86400.0
     if n_prs <= 0:
         return False, days, "no new pull requests", None
     gate_from = None
     if last_report is not None and days * 24.0 < min_interval_hours:
         gate_from = last_report + datetime.timedelta(hours=min_interval_hours)
+    score = n_prs + (days or 0.0)
     if complete:
         rule, rule_from = "declared complete", None
-    elif last_report is None:
-        rule, rule_from = "never reported", None
-    elif n_prs + days > threshold:
-        rule, rule_from = f"N+T = {n_prs + days:.1f} > {threshold:g}", None
+    elif unassessed:
+        rule, rule_from = f"not yet assessed: {unassessed}", None
+    elif score > threshold:
+        rule, rule_from = f"N+T = {score:.1f} > {threshold:g}", None
     else:
-        rule = f"N+T = {n_prs + days:.1f}, needs > {threshold:g}"
-        rule_from = last_report + datetime.timedelta(days=threshold - n_prs)
+        rule = f"N+T = {score:.1f}, needs > {threshold:g}"
+        rule_from = since + datetime.timedelta(days=threshold - n_prs) if since is not None else None
     if gate_from is not None:
         note = (f"reported {days * 24.0:.1f}h ago; the merge gate allows one report per "
                 f"{min_interval_hours:g}h ({rule})")
@@ -255,13 +301,15 @@ def assess(n_prs, last_report, complete, now, threshold=THRESHOLD,
     return True, days, rule, None
 
 
-def _row(area, rel_dir, n_prs, days, complete, qualifies, note, qualifies_from=None):
+def _row(area, rel_dir, n_prs, days, complete, qualifies, note, qualifies_from=None, assessed=None):
     """One line of the candidate table the `threshold` strategy writes (see `write_table`)."""
     return {
         "area": area,
         "rel_dir": rel_dir,
         "prs": n_prs,
         "days": None if days is None else round(days, 2),
+        "score": round(n_prs + (days or 0.0), 2),
+        "assessed": assessed,
         "complete": complete,
         "qualifies": qualifies,
         "note": note,
@@ -663,23 +711,23 @@ def _choose_by_threshold(areas, candidates, notes, roadmap_dir, to_sha, now, thr
             days = None if last is None else (now - last).total_seconds() / 86400.0
             rows.append(_row(area, rel_dir, 0, days, complete, False, notes.get(area, "not a candidate")))
             continue
+        gap = assessment_gap(roadmap_dir, area, rel_dir, c.get("status_text"))
         ok, days, note, qualifies_from = assess(
-            len(c["prs"]), last, complete, now, threshold=threshold, min_interval_hours=min_interval_hours
+            len(c["prs"]), last, complete, now, threshold=threshold, min_interval_hours=min_interval_hours,
+            unassessed=gap, added=roadmap_added_at(roadmap_dir, rel_dir) if last is None else None,
         )
         c["days"] = days
         c["note"] = note
-        rows.append(_row(area, rel_dir, len(c["prs"]), days, complete, ok, note, qualifies_from))
+        c["reported"] = last is not None
+        c["score"] = len(c["prs"]) + (days or 0.0)
+        rows.append(_row(area, rel_dir, len(c["prs"]), days, complete, ok, note, qualifies_from, gap is None))
         if ok:
             qualifying.append(c)
 
-    # Most PRs first; among equals the one reported longest ago (never reported counts as longest),
-    # then by name so the choice is deterministic.
-    ranked = sorted(
-        qualifying,
-        key=lambda c: (-len(c["prs"]), -(math.inf if c["days"] is None else c["days"]), c["area"]),
-    )
+    # The largest N + T first; among equals the most PRs, then by name so the choice is deterministic.
+    ranked = sorted(qualifying, key=lambda c: (-c["score"], -len(c["prs"]), c["area"]))
     order = {c["area"]: i for i, c in enumerate(ranked)}
-    rows.sort(key=lambda r: (r["area"] not in order, order.get(r["area"], 0), -r["prs"], r["area"]))
+    rows.sort(key=lambda r: (r["area"] not in order, order.get(r["area"], 0), -r["score"], r["area"]))
     upcoming = [r["qualifies_from"] for r in rows if r["qualifies_from"]]
     table = {
         "version": 1,
@@ -695,17 +743,22 @@ def _choose_by_threshold(areas, candidates, notes, roadmap_dir, to_sha, now, thr
     if table_path:
         write_table(table_path, table)
     if not ranked:
-        waiting = sorted((r for r in rows if r["prs"] > 0), key=lambda r: (-(r["prs"] + (r["days"] or 0)), r["area"]))
+        waiting = sorted((r for r in rows if r["prs"] > 0), key=lambda r: (-r["score"], r["area"]))
         closest = ", ".join(f"{r['area']} ({r['note']})" for r in waiting[:3])
         raise NotDue(
             f"no roadmap qualifies yet: {len(waiting)} have new pull requests"
             + (f"; closest: {closest}" if closest else "")
         )
     best = ranked[0]
-    since = "never reported" if best["days"] is None else f"last reported {best['days']:.1f} days ago"
+    if best["days"] is None:
+        since = "never reported"
+    elif not best["reported"]:
+        since = f"never reported, added {best['days']:.1f} days ago"
+    else:
+        since = f"last reported {best['days']:.1f} days ago"
     reason = (
         f"{best['area']} has {len(best['prs'])} PR(s) since {best['from_sha'][:7]}, {since} "
-        f"({best['note']}); the most PRs of {len(ranked)} qualifying roadmap(s)"
+        f"({best['note']}); the largest N+T ({best['score']:.1f}) of {len(ranked)} qualifying roadmap(s)"
     )
     return best, ranked, reason
 
