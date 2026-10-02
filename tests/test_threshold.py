@@ -1,8 +1,8 @@
 """Tests for the `threshold` strategy, the active-over-archived area rule, and the label cache.
 
 The rule: N PRs in a roadmap's window, T days since its last report. It qualifies when N > 0 and it
-is declared complete or N + T > THRESHOLD; the gate's per-roadmap interval still applies; the one
-with the most PRs wins. The roadmap checkout is a real git repository, because "when was it last
+is declared complete, N + T > THRESHOLD, or it is not yet assessed; the gate's per-roadmap interval
+still applies; unassessed roadmaps go first, then the largest N + T. The roadmap checkout is a real git repository, because "when was it last
 reported" is read from git exactly as the gate's collector reads it from the API.
 """
 
@@ -199,6 +199,17 @@ def test_an_unassessed_roadmap_qualifies_and_ranks_by_n_plus_t():
     assert [c["area"] for c in ranked] == ["New", "Stale"], [c["area"] for c in ranked]
     assert "never reported, added 90.0 days ago" in plan._choose_by_threshold(
         areas, cands, {}, repo, "b" * 40, NOW, 10.0, 6.0, None)[2]
+
+
+def test_an_unassessed_roadmap_goes_before_any_assessed_one():
+    repo, areas = _setup([("Busy", "TauCetiRoadmap/Busy", 3.0), ("Edited", "TauCetiRoadmap/Edited", 0.5)])
+    # Edited's README names layers and changed after its report, as a roadmap PR does to it.
+    _commit(repo, "TauCetiRoadmap/Edited/README.md", README_WITH_LAYERS + "\nA new item.\n", ago(hours=2))
+    cands = [_candidate("Busy", 30), _candidate("Edited", 1, status=_status_for(README_WITH_LAYERS, "Edited"))]
+    best, ranked, reason = plan._choose_by_threshold(areas, cands, {}, repo, "b" * 40, NOW, 10.0, 6.0, None)
+    assert [c["area"] for c in ranked] == ["Edited", "Busy"], [c["area"] for c in ranked]
+    assert "Edited's README changed since its report" in reason, reason
+    assert "unassessed roadmaps go first" in reason and "1 unassessed among 2 qualifying" in reason, reason
 
 
 def test_ties_go_to_the_roadmap_reported_longest_ago():

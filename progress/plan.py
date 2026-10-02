@@ -22,8 +22,10 @@ since its README was added). The roadmap qualifies when N > 0 and one of these h
 declared complete (archived under `Completed/`), N + T > `THRESHOLD`, or it is not yet assessed (see
 `assessment_gap`: no report, or a report that does not assess its README as it now stands). A busy
 roadmap therefore qualifies quickly and a quiet one after a while, so none is starved, and one the
-Progress page shows as unassessed qualifies with its next PR. Among the qualifying roadmaps the one
-with the largest N + T wins. There is no project-wide cadence. The merge gate's per-roadmap interval
+Progress page shows as unassessed qualifies with its next PR. Among the qualifying roadmaps the
+unassessed ones go first, so an edit to a README is followed by a report that assesses the README as
+it now stands before any routine report; within each group the one with the largest N + T wins.
+There is no project-wide cadence. The merge gate's per-roadmap interval
 (`gate.MIN_REPORT_INTERVAL_HOURS`) still holds, so the planner applies it too rather than choose a
 report the gate would refuse.
 """
@@ -720,12 +722,14 @@ def _choose_by_threshold(areas, candidates, notes, roadmap_dir, to_sha, now, thr
         c["note"] = note
         c["reported"] = last is not None
         c["score"] = len(c["prs"]) + (days or 0.0)
+        c["assessed"] = gap is None
         rows.append(_row(area, rel_dir, len(c["prs"]), days, complete, ok, note, qualifies_from, gap is None))
         if ok:
             qualifying.append(c)
 
-    # The largest N + T first; among equals the most PRs, then by name so the choice is deterministic.
-    ranked = sorted(qualifying, key=lambda c: (-c["score"], -len(c["prs"]), c["area"]))
+    # Unassessed roadmaps first, then the largest N + T; among equals the most PRs, then by name so
+    # the choice is deterministic.
+    ranked = sorted(qualifying, key=lambda c: (c["assessed"], -c["score"], -len(c["prs"]), c["area"]))
     order = {c["area"]: i for i, c in enumerate(ranked)}
     rows.sort(key=lambda r: (r["area"] not in order, order.get(r["area"], 0), -r["score"], r["area"]))
     upcoming = [r["qualifies_from"] for r in rows if r["qualifies_from"]]
@@ -756,10 +760,13 @@ def _choose_by_threshold(areas, candidates, notes, roadmap_dir, to_sha, now, thr
         since = f"never reported, added {best['days']:.1f} days ago"
     else:
         since = f"last reported {best['days']:.1f} days ago"
-    reason = (
-        f"{best['area']} has {len(best['prs'])} PR(s) since {best['from_sha'][:7]}, {since} "
-        f"({best['note']}); the largest N+T ({best['score']:.1f}) of {len(ranked)} qualifying roadmap(s)"
-    )
+    if best["assessed"]:
+        rank = f"the largest N+T ({best['score']:.1f}) of {len(ranked)} qualifying roadmap(s)"
+    else:
+        unassessed = sum(1 for c in ranked if not c["assessed"])
+        rank = (f"unassessed roadmaps go first; the largest N+T ({best['score']:.1f}) of {unassessed} "
+                f"unassessed among {len(ranked)} qualifying roadmap(s)")
+    reason = f"{best['area']} has {len(best['prs'])} PR(s) since {best['from_sha'][:7]}, {since} ({best['note']}); {rank}"
     return best, ranked, reason
 
 
