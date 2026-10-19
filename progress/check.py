@@ -35,7 +35,10 @@ SECTION_WORDS = 300
 SECTION_PARAGRAPHS = 3
 STATUS_HEADINGS = ["## Where this roadmap stands", "## The frontier"]
 
-DOCS_URL_RE = re.compile(r"https://taucetiproject\.github\.io/[^\s)>\]\"'`]+")
+# The documentation moved from GitHub Pages to taucetiproject.org on 2026-10-08. Reports written
+# before then link to the old host, which redirects, so a link on either host is a documentation link.
+DOCS_BASES = (DOCS_BASE, "https://taucetiproject.github.io/TauCeti/docs")
+DOCS_URL_RE = re.compile(r"https://taucetiproject\.(?:org|github\.io)/[^\s)>\]\"'`]+")
 ASSESSED = ("done", "partial", "untouched")
 
 
@@ -73,9 +76,10 @@ def dead_links(urls, docs):
     any other reason says nothing about the link, so it is returned separately as unverifiable.
     """
     dead, unverified = [], []
-    prefix = DOCS_BASE.rstrip("/") + "/"
+    prefixes = [base.rstrip("/") + "/" for base in DOCS_BASES]
     for url in sorted(set(urls)):
-        if not url.startswith(prefix) or "#" not in url:
+        prefix = next((p for p in prefixes if url.startswith(p)), None)
+        if prefix is None or "#" not in url:
             continue
         page, frag = url[len(prefix):].split("#", 1)
         try:

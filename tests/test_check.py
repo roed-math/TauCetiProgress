@@ -126,6 +126,20 @@ def test_a_url_from_the_previous_report_is_allowed_but_must_still_exist():
     assert any("does not exist" in f for f in fails), fails
 
 
+def test_a_url_on_the_old_documentation_host_is_still_checked():
+    legacy = OLD_URL.replace(DOCS_BASE, check.DOCS_BASES[1])
+    assert legacy != OLD_URL
+    fails, *_ = run(status(link=legacy) + block("done", "partial"), old=previous(link=legacy))
+    assert fails == [], fails
+    renamed = FakeDocs({"TauCeti/Contour/Basic.html": ["TauCeti.harnack"],
+                        "TauCeti/Contour/Old.html": ["TauCeti.meanValue'"]})
+    fails, *_ = run(status(link=legacy) + block("done", "partial"), old=previous(link=legacy), docs=renamed)
+    assert any("dead documentation link" in f and legacy in f for f in fails), fails
+    built = legacy.replace("meanValue", "meanValue_le")
+    fails, *_ = run(status(link=built) + block("done", "partial"), old=previous(link=legacy))
+    assert any("not copied" in f and built in f for f in fails), fails
+
+
 def test_an_unreadable_page_is_a_warning_not_a_dead_link():
     flaky = FakeDocs({"TauCeti/Contour/Basic.html": DocsError("the site is redeploying")})
     fails, warns, _ = run(status() + block("done", "partial"), docs=flaky)
