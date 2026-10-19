@@ -54,8 +54,8 @@ its report carries no coverage header bound to the README as it now stands (for 
 sub-roadmap). The merge gate's six-hour interval per roadmap still applies. Among the qualifying
 roadmaps the one with the largest N + T wins. There is no project-wide cadence, so this suits a
 worker that polls for work: `--table FILE` records every roadmap's standing, including when the next
-one will qualify, and `--label-cache FILE` keeps each area's merged PRs between runs, so a run makes
-one search for what merged since the last instead of a query per area.
+one will qualify, and `--label-cache FILE` keeps each area's closed PRs between runs, so a run makes
+one search for what closed since the last instead of a query per area.
 
 `check` holds a report to the prompt's own limits (750 and 300 words, the two status headings), and
 refuses a documentation link that was not copied from the facts or the previous report, one whose

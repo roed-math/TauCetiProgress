@@ -191,8 +191,8 @@ def build_parser():
                    help="threshold only: write every roadmap's standing under the rule here, "
                         "whether or not one qualifies")
     p.add_argument("--label-cache", default=None,
-                   help="a JSON file keeping each area's merged PRs between runs, so a run asks "
-                        "GitHub only for what merged since the last (env TAUCETI_PROGRESS_LABEL_CACHE)")
+                   help="a JSON file keeping each area's closed PRs between runs, so a run asks "
+                        "GitHub only for what closed since the last (env TAUCETI_PROGRESS_LABEL_CACHE)")
     p.add_argument("--out", default=None, help="write the plan JSON here instead of stdout")
     p.set_defaults(fn=cmd_plan)
 

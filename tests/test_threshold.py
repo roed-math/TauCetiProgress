@@ -259,12 +259,12 @@ def test_under_threshold_anyone_s_fresh_report_holds_its_area():
              "headRepositoryOwner": {"login": "ldct"}}
     repo, _areas = _setup([("Busy", "TauCetiRoadmap/Busy", 20.0), ("Old", "TauCetiRoadmap/Old", 20.0)])
     saved = (plan.docs_source_commit, window_mod.head_sha, window_mod.is_ancestor, plan.area_window,
-             gh.merged_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date)
+             gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date)
     plan.docs_source_commit = lambda: "b" * 40
     window_mod.head_sha = lambda *a, **k: "b" * 40
     window_mod.is_ancestor = lambda *a, **k: True
     plan.area_window = lambda code_dir, prs, f, t: list(prs)
-    gh.merged_prs_for_area = lambda area, repo=None: [1, 2, 3]
+    gh.closed_prs_for_area = lambda area, repo=None: {1: None, 2: None, 3: None}
     plan.read_area_files = lambda roadmap_dir, rel_dir: ("status", "log")
     plan.files.cursor = lambda text: "a" * 40
     window_mod.commit_date = lambda *a, **k: "2026-09-30T00:00:00+00:00"
@@ -278,7 +278,7 @@ def test_under_threshold_anyone_s_fresh_report_holds_its_area():
         assert any("#493" in s and "no longer marks the area in flight" in s for s in p["skipped"]), p["skipped"]
     finally:
         (plan.docs_source_commit, window_mod.head_sha, window_mod.is_ancestor, plan.area_window,
-         gh.merged_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date) = saved
+         gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date) = saved
 
 
 # ----- assessment_gap: what the Progress page shows as unassessed --------------------------------
@@ -333,17 +333,19 @@ def test_roadmap_added_at_is_the_readme_s_first_commit():
 
 
 class Fake:
-    def __init__(self, areas, merged=None):
-        self.areas, self.merged = areas, merged or {}
+    """`areas`: {area: {number: native_sha_or_None}}; `closed`: {number: (labels, native_sha_or_None)}."""
+
+    def __init__(self, areas, closed=None):
+        self.areas, self.closed = areas, closed or {}
         self.area_calls, self.since_calls = [], []
 
     def area_fn(self, area, repo=None):
         self.area_calls.append(area)
-        return sorted(self.areas.get(area, []), reverse=True)
+        return dict(self.areas.get(area, {}))
 
     def since_fn(self, since, repo=None, limit=None):
         self.since_calls.append(since)
-        return dict(self.merged)
+        return dict(self.closed)
 
 
 def _cache(path, fake, now=NOW):
@@ -352,52 +354,67 @@ def _cache(path, fake, now=NOW):
 
 def test_a_new_cache_fetches_each_area_once_and_searches_nothing():
     path = pathlib.Path(tempfile.mkdtemp()) / "labels.json"
-    fake = Fake({"A": [3, 1], "B": [2]})
+    fake = Fake({"A": {3: None, 1: "c1"}, "B": {2: None}})
     c = _cache(path, fake)
-    assert c.for_area("A") == [3, 1] and c.for_area("B") == [2] and c.for_area("A") == [3, 1]
+    assert c.for_area("A") == {3: None, 1: "c1"} and c.for_area("B") == {2: None}
+    assert c.for_area("A") == {3: None, 1: "c1"}
     assert fake.area_calls == ["A", "B"] and fake.since_calls == []
     c.save()
-    assert json.loads(path.read_text())["areas"] == {"A": [3, 1], "B": [2]}
+    assert json.loads(path.read_text())["areas"] == {"A": {"3": None, "1": "c1"}, "B": {"2": None}}
 
 
-def test_a_later_run_asks_only_for_what_merged_since():
+def test_a_later_run_asks_only_for_what_closed_since():
     path = pathlib.Path(tempfile.mkdtemp()) / "labels.json"
-    c = _cache(path, Fake({"A": [3, 1], "B": [2]}))
+    c = _cache(path, Fake({"A": {3: None, 1: "c1"}, "B": {2: None}}))
     c.for_area("A"), c.for_area("B")
     c.save()
     later = NOW + datetime.timedelta(hours=3)
-    fake = Fake({}, merged={7: ["roadmap/A", "bug"], 8: ["roadmap/none"], 9: ["roadmap/C"], 3: ["roadmap/A"]})
+    # 7 is a bors merge (closed, no native merge); 3 was closed unmerged, reopened, and merged natively.
+    fake = Fake({}, closed={7: (["roadmap/A", "bug"], None), 8: (["roadmap/none"], None),
+                            9: (["roadmap/C"], None), 3: (["roadmap/A"], "c3")})
     c2 = _cache(path, fake, now=later)
-    assert c2.for_area("A") == [7, 3, 1], c2.for_area("A")
-    assert c2.for_area("B") == [2]
+    assert c2.for_area("A") == {7: None, 3: "c3", 1: "c1"}, c2.for_area("A")
+    assert c2.for_area("B") == {2: None}
     assert fake.since_calls == [NOW - gh.LabelCache.MARGIN], fake.since_calls
     assert fake.area_calls == []
     # An area the cache has never seen is fetched whole, not pieced together from the search.
-    fake.areas = {"C": [9, 5]}
-    assert c2.for_area("C") == [9, 5] and fake.area_calls == ["C"]
+    fake.areas = {"C": {9: None, 5: None}}
+    assert c2.for_area("C") == {9: None, 5: None} and fake.area_calls == ["C"]
 
 
 def test_a_full_search_page_starts_the_cache_over():
     path = pathlib.Path(tempfile.mkdtemp()) / "labels.json"
-    c = _cache(path, Fake({"A": [1]}))
+    c = _cache(path, Fake({"A": {1: None}}))
     c.for_area("A")
     c.save()
-    fake = Fake({"A": [5, 1]}, merged={n: ["roadmap/A"] for n in range(gh.LabelCache.SEARCH_LIMIT)})
+    fake = Fake({"A": {5: None, 1: None}},
+                closed={n: (["roadmap/A"], None) for n in range(gh.LabelCache.SEARCH_LIMIT)})
     c2 = _cache(path, fake, now=NOW + datetime.timedelta(hours=1))
-    assert c2.for_area("A") == [5, 1] and fake.area_calls == ["A"]
+    assert c2.for_area("A") == {5: None, 1: None} and fake.area_calls == ["A"]
 
 
 def test_a_day_old_or_unreadable_cache_is_refetched():
     path = pathlib.Path(tempfile.mkdtemp()) / "labels.json"
-    c = _cache(path, Fake({"A": [1]}))
+    c = _cache(path, Fake({"A": {1: None}}))
     c.for_area("A")
     c.save()
-    fake = Fake({"A": [4, 1]})
+    fake = Fake({"A": {4: None, 1: None}})
     c2 = _cache(path, fake, now=NOW + datetime.timedelta(hours=25))
-    assert c2.for_area("A") == [4, 1] and fake.area_calls == ["A"] and fake.since_calls == []
+    assert c2.for_area("A") == {4: None, 1: None} and fake.area_calls == ["A"] and fake.since_calls == []
     path.write_text("{not json")
-    fake = Fake({"A": [4, 1]})
-    assert _cache(path, fake).for_area("A") == [4, 1] and fake.area_calls == ["A"]
+    fake = Fake({"A": {4: None, 1: None}})
+    assert _cache(path, fake).for_area("A") == {4: None, 1: None} and fake.area_calls == ["A"]
+
+
+def test_a_version_1_cache_of_native_merges_is_refetched():
+    """Version 1 listed GitHub-native merges only and so held no bors merge; reusing one would keep
+    the planner blind to them until its next full refetch."""
+    path = pathlib.Path(tempfile.mkdtemp()) / "labels.json"
+    path.write_text(json.dumps({"version": 1, "repo": gh.CODE_REPO, "full_at": NOW.isoformat(),
+                                "synced_at": NOW.isoformat(), "areas": {"A": [1]}}))
+    fake = Fake({"A": {9: None, 1: None}})
+    c = _cache(path, fake, now=NOW + datetime.timedelta(hours=1))
+    assert c.for_area("A") == {9: None, 1: None} and fake.area_calls == ["A"] and fake.since_calls == []
 
 
 for _name, _fn in sorted(globals().items()):

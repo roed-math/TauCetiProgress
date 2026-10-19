@@ -122,42 +122,54 @@ def closed_prs_for_area(area, repo=CODE_REPO):
 
 
 
-def merged_prs_since(since, repo=CODE_REPO, limit=1000):
-    """`{number: [label, ...]}` for PRs merged at or after `since` (a UTC datetime). One search, which
-    GitHub caps at `limit` results; the caller must treat a full page as "possibly more"."""
+def closed_prs_since(since, repo=CODE_REPO, limit=1000):
+    """`{number: (labels, native_merge_sha_or_None)}` for PRs closed at or after `since` (a UTC
+    datetime): the incremental counterpart of `closed_prs_for_area`, with the same meaning for the
+    SHA. One search, which GitHub caps at `limit` results; the caller must treat a full page as
+    "possibly more"."""
     stamp = since.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     out = gh([
-        "pr", "list", "--repo", repo, "--state", "merged", "--search", f"merged:>={stamp}",
-        "--limit", str(int(limit)), "--json", "number,labels",
+        "pr", "list", "--repo", repo, "--state", "closed", "--search", f"closed:>={stamp}",
+        "--limit", str(int(limit)), "--json", "number,labels,mergedAt,mergeCommit",
     ])
     try:
         rows = json.loads(out)
-    except json.JSONDecodeError as exc:
+        found = {}
+        for r in rows:
+            sha = (r.get("mergeCommit") or {}).get("oid") if r.get("mergedAt") else None
+            if r.get("mergedAt") and not sha:
+                raise GhError(f"native merge SHA unavailable for PR #{r['number']}")
+            found[int(r["number"])] = ([lb.get("name") or "" for lb in r.get("labels") or []], sha)
+        return found
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise GhError(f"could not parse gh pr list output: {exc}") from exc
-    return {int(r["number"]): [lb.get("name") or "" for lb in r.get("labels") or []] for r in rows}
 
 
 class LabelCache:
-    """`merged_prs_for_area`, answered from a file kept between runs.
+    """`closed_prs_for_area`, answered from a file kept between runs.
 
-    A planner run asks for every area's merged PRs, one paginated query per area: about a hundred
+    A planner run asks for every area's closed PRs, one paginated query per area: about a hundred
     requests for fifty-odd roadmaps. That is fine every eight hours and wasteful for a caller that
     polls for work every few minutes. So the answers are kept, and each later run makes ONE search for
-    the PRs merged since the last one and files them under their labels.
+    the PRs closed since the last one and files them under their labels.
 
-    Two things the incremental search cannot see: a label removed from a PR after it merged, and a
-    label added to one that merged before the last search. Both are rare, and neither is permanent:
+    Two things the incremental search cannot see: a label removed from a PR after it closed, and a
+    label added to one that closed before the last search. Both are rare, and neither is permanent:
     the whole cache is refetched once `FULL_EVERY_HOURS` have passed, and whenever the search comes
-    back full (more merged since the last run than one search returns).
+    back full (more closed since the last run than one search returns).
 
-    Only merged PRs are cached, and a merge is final, so a stale entry can only be a relabelling. A
-    cache file this version does not understand is discarded and refetched, never trusted.
+    A PR closed without merging is kept like any other: the first-parent history decides what landed
+    (see `closed_prs_for_area`). If it is reopened and merges later, the search sees it close again and
+    its entry is replaced. A cache file this version does not understand is discarded and refetched,
+    never trusted.
     """
 
-    VERSION = 1
+    # 2: entries are `{number: native_merge_sha_or_None}` over closed PRs. Version 1 listed GitHub-native
+    # merges only, so it never saw a bors merge.
+    VERSION = 2
     FULL_EVERY_HOURS = 24.0
-    # The search is by merge time at one-second precision; the margin absorbs clock skew between this
-    # host and GitHub and a merge that was being recorded while the last search ran.
+    # The search is by close time at one-second precision; the margin absorbs clock skew between this
+    # host and GitHub and a close that was being recorded while the last search ran.
     MARGIN = datetime.timedelta(hours=1)
     SEARCH_LIMIT = 1000
 
@@ -165,8 +177,8 @@ class LabelCache:
         self.path = pathlib.Path(path)
         self.repo = repo
         self.now = now or datetime.datetime.now(datetime.timezone.utc)
-        self._since_fn = since_fn or merged_prs_since
-        self._area_fn = area_fn or merged_prs_for_area
+        self._since_fn = since_fn or closed_prs_since
+        self._area_fn = area_fn or closed_prs_for_area
         self._synced = False
         self.data = self._load()
 
@@ -181,8 +193,9 @@ class LabelCache:
             datetime.datetime.fromisoformat(obj["synced_at"])
             ok = (obj.get("version") == self.VERSION and obj.get("repo") == self.repo
                   and isinstance(obj.get("areas"), dict)
+                  and all(isinstance(v, dict) for v in obj["areas"].values())
                   and 0 <= (self.now - full_at).total_seconds() < self.FULL_EVERY_HOURS * 3600)
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
             ok = False
         if not ok:
             self._synced = True  # every area will be fetched in full this run; there is nothing to catch up
@@ -190,36 +203,37 @@ class LabelCache:
         return obj
 
     def _sync(self):
-        """Fold the PRs merged since the last run into the cached areas, once per run."""
+        """Fold the PRs closed since the last run into the cached areas, once per run."""
         if self._synced:
             return
         self._synced = True
         since = datetime.datetime.fromisoformat(self.data["synced_at"]) - self.MARGIN
         started = self.now
-        merged = self._since_fn(since, repo=self.repo, limit=self.SEARCH_LIMIT)
-        if len(merged) >= self.SEARCH_LIMIT:
+        closed = self._since_fn(since, repo=self.repo, limit=self.SEARCH_LIMIT)
+        if len(closed) >= self.SEARCH_LIMIT:
             # More than one search holds: start over, fetching every area in full as it is asked for.
             self.data = self._fresh()
             return
         areas = self.data["areas"]
-        for number, labels in merged.items():
+        for number, (labels, sha) in closed.items():
             for label in labels:
                 if not label.startswith(ROADMAP_LABEL_PREFIX) or label in NON_AREA_LABELS:
                     continue
                 area = label[len(ROADMAP_LABEL_PREFIX):]
-                if area in areas and number not in areas[area]:
-                    areas[area] = sorted(set(areas[area]) | {number}, reverse=True)
+                if area in areas:
+                    areas[area][str(number)] = sha
         self.data["synced_at"] = started.isoformat(timespec="seconds")
 
     def for_area(self, area):
-        """Every merged PR number labelled `roadmap/<area>`, newest first (as `merged_prs_for_area`)."""
+        """`{number: native_merge_sha_or_None}` for every closed PR labelled `roadmap/<area>` (as
+        `closed_prs_for_area`)."""
         self._sync()
         areas = self.data["areas"]
         if area not in areas:
             # First sight of this area (or a fresh cache): fetch it in full. That fetch is current, so
             # it needs nothing from the search, and later searches keep it up to date.
-            areas[area] = list(self._area_fn(area, repo=self.repo))
-        return list(areas[area])
+            areas[area] = {str(n): sha for n, sha in self._area_fn(area, repo=self.repo).items()}
+        return {int(n): sha for n, sha in areas[area].items()}
 
     def save(self):
         """Write the cache back. Best effort: a cache that cannot be written costs the next run a full

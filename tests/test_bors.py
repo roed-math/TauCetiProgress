@@ -1,5 +1,6 @@
 """Native and bors merges share commit windows, including the gate's bootstrap cursor."""
 
+import datetime
 import importlib.util
 import json
 import os
@@ -81,6 +82,11 @@ class BorsTests(unittest.TestCase):
                 for i, chunk in enumerate(chunks)])
         if args[:2] == ["api", "user"]:
             return "operator"
+        if args[:2] == ["pr", "list"]:
+            # The label cache's incremental search: every closure since its last run, merged or not.
+            self.assertEqual(args[args.index("--state") + 1], "closed")
+            self.assertTrue(args[args.index("--search") + 1].startswith("closed:>="))
+            return json.dumps(self.closed_since)
         self.fail(f"unexpected network request: {args}")
 
     def build(self):
@@ -106,6 +112,31 @@ class BorsTests(unittest.TestCase):
         self.rows = [self.rows[3]]
         with self.assertRaises(plan.NotDue):
             self.build()
+
+    def test_the_threshold_planner_counts_bors_merges_through_its_label_cache(self):
+        """The planner as the progress workers run it. Its label cache once listed GitHub-native merges
+        only, so a roadmap whose PRs all merged through bors read as "no merged PRs yet"."""
+        self.run_git("init", "-q", "-b", "main", str(self.roadmap))
+        self.run_git("-C", str(self.roadmap), "add", "-A")
+        self.run_git("-C", str(self.roadmap), "commit", "-q", "-m", "PDE roadmap")
+        labels = pathlib.Path(self.tmp.name) / "labels.json"
+        start = datetime.datetime.now(datetime.timezone.utc)
+
+        def run(now):
+            cache = gh.LabelCache(labels, now=now)
+            with patch.object(gh, "gh", side_effect=self.github), \
+                 patch.object(plan, "docs_source_commit", return_value=self.tip):
+                return plan.build_plan(self.roadmap, self.code, open_prs=[], ref="main",
+                                       strategy="threshold", label_cache=cache)
+
+        self.assertEqual(run(start)["prs"], [102, 100, 101])
+        self.calls.clear()
+        self.commit("feat: another bors squash (#104)")
+        self.tip = window.head_sha(self.code, ref="main")
+        self.closed_since = [{"number": 104, "labels": [{"name": "roadmap/PDE"}],
+                              "mergedAt": None, "mergeCommit": None}]
+        self.assertEqual(run(start + datetime.timedelta(hours=1))["prs"], [104, 102, 100, 101])
+        self.assertEqual([c[:2] for c in self.calls], [["pr", "list"]])  # no per-area refetch
 
     def test_unmerged_reachable_test_merge_sha_is_ignored(self):
         with patch.object(gh, "gh", side_effect=self.github):
