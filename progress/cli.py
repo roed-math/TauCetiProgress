@@ -79,6 +79,7 @@ def cmd_plan(args):
             threshold=args.threshold,
             table_path=args.table,
             label_cache=cache,
+            skip_areas=set(args.skip_area),
         )
     except plan.NotDue as exc:
         print(f"not due: {exc}", file=sys.stderr)
@@ -178,6 +179,9 @@ def build_parser():
     p.add_argument("--idle-hours", type=float, default=None)
     p.add_argument("--min-prs", type=int, default=None)
     p.add_argument("--area", default=None, help="force a single area (testing)")
+    p.add_argument("--skip-area", action="append", default=None, metavar="AREA",
+                   help="never choose this roadmap; repeatable (env TAUCETI_PROGRESS_SKIP, "
+                        "comma-separated)")
     # The next three default from the environment, so a worker that passes its environment through
     # can select them without a code change of its own.
     p.add_argument("--strategy", default=None,
@@ -270,6 +274,8 @@ def main(argv=None):
             env = os.environ.get("TAUCETI_PROGRESS_THRESHOLD")
             args.threshold = float(env) if env else plan_mod.THRESHOLD
         args.label_cache = args.label_cache or os.environ.get("TAUCETI_PROGRESS_LABEL_CACHE") or None
+        if args.skip_area is None:
+            args.skip_area = [a.strip() for a in os.environ.get("TAUCETI_PROGRESS_SKIP", "").split(",") if a.strip()]
     try:
         return args.fn(args)
     except KeyboardInterrupt:

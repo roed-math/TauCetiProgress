@@ -496,6 +496,7 @@ def build_plan(
     min_interval_hours=MIN_REPORT_INTERVAL_HOURS,
     table_path=None,
     label_cache=None,
+    skip_areas=(),
 ):
     """The whole decision. Returns a plan dict, or raises NotDue.
 
@@ -506,7 +507,9 @@ def build_plan(
     `min_prs` and `commits` are unused, and `table_path`, if given, receives every roadmap's standing
     under the rule, whether or not one qualifies; a caller polling for work reads it to know when to
     look again. `label_cache` (a `gh.LabelCache`) answers the per-area label queries from a file kept
-    between runs instead of asking GitHub for every area each time.
+    between runs instead of asking GitHub for every area each time. `skip_areas` are roadmaps the
+    operator has set aside, such as one whose README no report can be written against: each is
+    listed in `skipped` and the table, and never chosen.
     """
     if strategy not in STRATEGIES:
         raise ValueError(f"unknown strategy {strategy!r}; one of {', '.join(STRATEGIES)}")
@@ -562,6 +565,9 @@ def build_plan(
         notes[area] = message[len(area) + 2:] if message.startswith(f"{area}: ") else message
 
     for area, rel_dir in areas.items():
+        if area in skip_areas:
+            skip(area, f"{area}: skipped by the operator")
+            continue
         if area in blocked:
             skip(area, f"{area}: PR #{blocked[area]['number']} is still open")
             continue
