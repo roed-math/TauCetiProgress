@@ -251,11 +251,11 @@ def test_a_complete_roadmap_with_one_pr_is_chosen():
 
 def test_under_threshold_anyone_s_fresh_report_holds_its_area():
     """Checked through build_plan's own call, with the network reads replaced: a stranger's report
-    two hours old holds its area, one twenty hours old does not."""
+    two hours old holds its area, one four days old does not."""
     from progress import window as window_mod
     fresh = {"number": 519, "headRefName": "progress/ae69ef9-163ce80/Busy", "createdAt": "2026-09-30T10:00:00Z",
              "headRepositoryOwner": {"login": "ldct"}}
-    stale = {"number": 493, "headRefName": "progress/6bc3780-b1ab119/Old", "createdAt": "2026-09-29T16:00:00Z",
+    stale = {"number": 493, "headRefName": "progress/6bc3780-b1ab119/Old", "createdAt": "2026-09-26T08:00:00Z",
              "headRepositoryOwner": {"login": "ldct"}}
     repo, _areas = _setup([("Busy", "TauCetiRoadmap/Busy", 20.0), ("Old", "TauCetiRoadmap/Old", 20.0)])
     saved = (plan.docs_source_commit, window_mod.head_sha, window_mod.is_ancestor, plan.area_window,

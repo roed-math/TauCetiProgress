@@ -48,9 +48,9 @@ def test_the_area_is_the_last_branch_segment():
 
 def test_a_stuck_pr_stops_blocking_after_the_cutoff():
     """The whole point: a permanently-refused report must not freeze its roadmap for everyone."""
-    blocked, stale = plan.in_flight_areas([pr(number=115, hours_old=72)], now=NOW, owners={OURS})
-    assert blocked == {}, "a three-day-old report is not in flight"
-    assert len(stale) == 1 and "#115" in stale[0] and "3.0 days" in stale[0]
+    blocked, stale = plan.in_flight_areas([pr(number=115, hours_old=96)], now=NOW, owners={OURS})
+    assert blocked == {}, "a four-day-old report is not in flight"
+    assert len(stale) == 1 and "#115" in stale[0] and "4.0 days" in stale[0]
 
 
 def test_the_stale_note_says_what_to_do():
@@ -91,9 +91,10 @@ def test_only_the_stale_area_is_released():
     assert len(stale) == 1 and "Exchangeability" in stale[0]
 
 
-def test_the_default_cutoff_matches_the_cadence():
-    """A report that has not merged within a full cadence period is stuck, not pending."""
-    assert plan.STALE_PR_HOURS == plan.IDLE_HOURS
+def test_the_default_cutoff_outlasts_two_congested_queue_passes():
+    """A caller waiting for `build` makes two queue passes; replaced sooner, a report never lands."""
+    blocked, stale = plan.in_flight_areas([pr(hours_old=58)], now=NOW, owners={OURS})
+    assert set(blocked) == {"PDE"} and stale == []
 
 
 def test_the_server_side_limit_never_refuses_a_report_the_planner_thinks_due():
