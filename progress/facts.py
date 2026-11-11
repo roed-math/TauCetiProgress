@@ -163,13 +163,9 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
 
     # Which commit belongs to which PR, so a blamed line can be attributed.
     pr_of_commit = {}
-    log = window.git(["log", "--first-parent", "--format=%H%x09%s", f"{from_sha}..{docs_sha}"],
-                     repo_dir)
-    for line in log.splitlines():
-        sha, _, subject = line.partition("\t")
-        n = window.pr_number_of_subject(subject.strip())
-        if n is not None and n in wanted:
-            pr_of_commit[sha.strip()] = n
+    for sha, n in window.first_parent_prs(repo_dir, f"{from_sha}..{docs_sha}"):
+        if n in wanted:
+            pr_of_commit[sha] = n
 
     files = changed_lean_files(repo_dir, pr_of_commit)
     truncated_modules = 0

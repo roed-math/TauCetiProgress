@@ -50,9 +50,35 @@ def test_pr_number_of_subject():
     assert window.pr_number_of_subject("fix: handle (#12) in parser") is None
 
 
-def test_pr_numbers_from_log_dedupes_and_keeps_order():
-    log = "feat: a (#3)\nfix: b (#2)\nfeat: c (#3)\nchore: none\nMerge pull request #1 from x\n"
-    assert window.pr_numbers_from_log(log) == [3, 2, 1]
+SOURCE = "Source-PR: TauCetiProject/TauCeti#"
+
+
+def test_pr_number_of_commit_reads_the_source_citation():
+    number = window.pr_number_of_commit
+    assert number("feat: queue landed", f"Prose.\n\n{SOURCE}7\n") == 7
+    assert number("feat: queue landed (#7)", f"{SOURCE}7") == 7
+    assert number("feat: x", "Source-PR: github:https://github.com/TauCetiProject/TauCeti#7") == 7
+    assert number("feat: x", "source-pr:\ttaucetiproject/tauceti#7") == 7
+    # Repair notes are appended below the citation, so it is not in git's trailer block.
+    assert number("feat: x (#7)", f"{SOURCE}7\nAccepted-Head: abc\n\nRepair explanation.") == 7
+    assert number("feat: x", f"{SOURCE}7\n{SOURCE}7") == 7
+    assert number("feat: plain squash (#9)", "No citation here.") == 9
+    assert number("chore: nothing", "") is None
+    # Prose and lookalike fields are not citations.
+    for body in ("Source-PR trailers now carry identity", "Source-PR-Notes: x", "Source-PR : x",
+                 "Source-PR:", "Source-PR: ", "  Source-PR: TauCetiProject/TauCeti#7"):
+        assert number("feat: x (#9)", body) == 9, body
+
+
+def test_pr_number_of_commit_refuses_what_it_cannot_attribute():
+    number = window.pr_number_of_commit
+    raises(window.GitError, lambda: number("feat: x", "Source-PR: invalid"), "unreadable")
+    raises(window.GitError, lambda: number("feat: x", "Source-PR: TauCetiProject/TauCeti#07"), "unreadable")
+    raises(window.GitError, lambda: number("feat: x", f"{SOURCE}7\n{SOURCE}8"), "more than one")
+    raises(window.GitError, lambda: number("feat: x (#8)", f"{SOURCE}7"), "subject says #8")
+    raises(window.GitError, lambda: number("feat: x", "Source-PR: other/Repo#7"), "other/repo")
+    raises(window.GitError,
+           lambda: number("feat: x", "Source-PR: forgejo:https://forge.example/team/Math#7"), "unreadable")
 
 
 # ----- a real git repo -------------------------------------------------------------------------
@@ -77,6 +103,58 @@ def make_repo(tmp, subjects):
                        check=True, capture_output=True, env=env)
         shas.append(window.git(["rev-parse", "HEAD"], tmp).strip())
     return shas
+
+
+def commit_messages(tmp, messages):
+    """Empty mainline commits with full messages (subject and body), oldest first. Returns [sha]."""
+    subprocess.run(["git", "init", "-q", "-b", "main", tmp], check=True, capture_output=True)
+    env = {**os.environ, "GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@e",
+           "GIT_COMMITTER_NAME": "T", "GIT_COMMITTER_EMAIL": "t@e"}
+    shas = []
+    for message in messages:
+        subprocess.run(["git", "-C", tmp, "commit", "-q", "--allow-empty", "-F", "-"],
+                       input=message, text=True, check=True, capture_output=True, env=env)
+        shas.append(window.git(["rev-parse", "HEAD"], tmp).strip())
+    return shas
+
+
+def test_a_commit_cited_only_by_source_pr_is_in_its_window():
+    """The queue's first batch (2026-11-05): no `(#N)` in the subject, only the citation.
+
+    Read from subjects alone, #2 is in no window, and since windows only move forward no later
+    report picks it up (TauCetiProgress#58).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        shas = commit_messages(tmp, [
+            "init",
+            "feat: a (#1)",
+            f"feat: landed by the queue\n\nA long description.\n\nRoadmap: X\n{SOURCE}2\n",
+            f"feat: repaired by the queue (#3)\n\n{SOURCE}3\n\nRepair notes.\n",
+            "chore: no pull request",
+        ])
+        assert window.first_parent_prs(tmp, "main") == [(shas[3], 3), (shas[2], 2), (shas[1], 1)]
+        assert window.window_prs(tmp, shas[0], shas[4]) == [3, 2, 1]
+        assert window.window_prs(tmp, shas[1], shas[2]) == [2]
+        assert window.find_merge_commit(tmp, 2, ref="main") == shas[2]
+        assert window.earliest_merged(tmp, [2, 3], ref="main") == (2, shas[2])
+        # GitHub shows such a PR as closed, not merged, so it has no native merge commit.
+        assert plan.unaccounted_prs(tmp, {2: None, 3: None}, ref="main") == []
+        assert plan.area_window(tmp, {2: None}, shas[0], shas[4]) == [2]
+
+
+def test_a_pr_landed_twice_in_one_window_is_listed_once():
+    """98 of that batch were empty second landings of PRs Bors had merged the day before."""
+    with tempfile.TemporaryDirectory() as tmp:
+        shas = commit_messages(tmp, ["init", "feat: a (#1)", "feat: b (#2)", f"feat: a\n\n{SOURCE}1\n"])
+        assert window.window_prs(tmp, shas[0], shas[3]) == [1, 2]
+        assert window.earliest_merged(tmp, [1], ref="main") == (1, shas[1])
+
+
+def test_an_unattributable_commit_refuses_the_whole_read_and_names_itself():
+    with tempfile.TemporaryDirectory() as tmp:
+        shas = commit_messages(tmp, ["init", f"feat: a (#1)\n\n{SOURCE}2\n", "feat: b (#3)"])
+        raises(window.GitError, lambda: window.window_prs(tmp, shas[0], shas[2]), shas[1][:10])
+        assert window.window_prs(tmp, shas[1], shas[2]) == [3]
 
 
 def test_window_is_half_open_and_excludes_from_sha():

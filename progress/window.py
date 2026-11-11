@@ -15,11 +15,21 @@ Pure functions take text and lists; the two that shell out to `git` are marked.
 import re
 import subprocess
 
+from .gh import CODE_REPO
+
 # Squash-merge subjects made by GitHub end in `(#1234)`. The roadmap repo also has a few true
 # merge commits whose subject is `Merge pull request #62 from ...`. Both forms appear in real
 # history, so both are recognised; anything else contributes no PR number.
 _SQUASH_RE = re.compile(r"\(#(\d+)\)\s*\Z")
 _MERGE_RE = re.compile(r"\AMerge pull request #(\d+)\b")
+
+# The TauCeti queue cites the pull request a commit lands as a `Source-PR: owner/repo#N` line, and
+# its first batch (1,197 commits on 2026-11-05) put the number nowhere else. Same grammar as
+# `provenance.commit_source` upstream (TauCetiProgress#52).
+_TRAILER_RE = re.compile(r"^(?P<token>[A-Za-z][A-Za-z0-9-]*):[ \t]+(?P<value>\S.*?)\s*$")
+_CITATION_RE = re.compile(
+    r"\A(?:github:https://github\.com/)?(?P<repo>[^/\s#:]+/[^/\s#]+)#(?P<number>[1-9][0-9]*)\Z"
+)
 
 
 # Windows track the `docgen` branch of TauCeti, NOT `main`.
@@ -45,6 +55,7 @@ def git(args, repo_dir):
         ["git", "-C", str(repo_dir), *args],
         capture_output=True,
         text=True,
+        errors="replace",  # commit bodies are read now, and one stray byte must not abort a plan
     )
     if proc.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed: {proc.stderr.strip() or proc.returncode}")
@@ -62,20 +73,52 @@ def pr_number_of_subject(subject):
     return None
 
 
-def pr_numbers_from_log(log_text):
-    """PR numbers from `git log --format=%s` output, in the order given, deduped.
+def pr_number_of_commit(subject, body="", repository=CODE_REPO):
+    """The PR a mainline commit lands, or None: its `Source-PR` citation, else its subject.
 
-    Order is preserved (newest first as git emits it) because the caller reports the newest
-    window boundary from the first entry.
+    The whole body is scanned, not git's trailer block, because the queue appends repair notes
+    below the citation. A citation that is malformed, repeated with different values, from another
+    repository, or at odds with the subject raises GitError: a guess here moves a cursor past work.
     """
-    out = []
-    seen = set()
-    for line in log_text.splitlines():
-        n = pr_number_of_subject(line.strip())
-        if n is not None and n not in seen:
-            seen.add(n)
-            out.append(n)
-    return out
+    cited = set()
+    for line in body.splitlines():
+        m = _TRAILER_RE.match(line)
+        if m and m["token"].lower() == "source-pr":
+            c = _CITATION_RE.match(m["value"])
+            if c is None:
+                raise GitError(f"unreadable Source-PR citation {m['value']!r}")
+            cited.add((c["repo"].lower(), int(c["number"])))
+    number = pr_number_of_subject(subject)
+    if not cited:
+        return number
+    if len(cited) != 1:
+        raise GitError("more than one Source-PR citation")
+    repo, source = next(iter(cited))
+    if repo != repository.lower():
+        raise GitError(f"Source-PR cites {repo}, not {repository}")
+    if number is not None and number != source:
+        raise GitError(f"subject says #{number} but Source-PR says #{source}")
+    return source
+
+
+def first_parent_prs(repo_dir, rev, repository=CODE_REPO):
+    """`(sha, pr_number)` for every first-parent commit of `rev` that lands a PR, newest first.
+
+    `--first-parent` is deliberate: it walks the mainline only, so a PR's own internal commits
+    (which may themselves mention other PR numbers) never leak into the result.
+    """
+    out = git(["log", "--first-parent", "-z", "--format=%H%x00%s%x00%b", rev], repo_dir)
+    fields = out.split("\0")
+    found = []
+    for i in range(0, len(fields) - 2, 3):
+        sha, subject, body = fields[i].strip(), fields[i + 1].strip(), fields[i + 2]
+        try:
+            number = pr_number_of_commit(subject, body, repository)
+        except GitError as exc:
+            raise GitError(f"commit {sha[:10]}: {exc}") from None
+        if number is not None:
+            found.append((sha, number))
+    return found
 
 
 def is_ancestor(repo_dir, maybe_ancestor, descendant):
@@ -112,18 +155,13 @@ def has_commit(repo_dir, sha):
 
 
 def window_prs(repo_dir, from_sha, to_sha):
-    """PR numbers merged in `(from_sha, to_sha]`, newest first.
-
-    `--first-parent` is deliberate: it walks the mainline only, so a PR's own internal commits
-    (which may themselves mention other PR numbers) never leak into the window.
-    """
+    """PR numbers merged in `(from_sha, to_sha]`, newest first, each once."""
     if not is_ancestor(repo_dir, from_sha, to_sha):
         raise GitError(
             f"{from_sha[:7]} is not an ancestor of {to_sha[:7]}; the cursor does not belong to "
             f"this history (rewritten branch, or a cursor from another repository)"
         )
-    log = git(["log", "--first-parent", "--format=%s", f"{from_sha}..{to_sha}"], repo_dir)
-    return pr_numbers_from_log(log)
+    return list(dict.fromkeys(n for _, n in first_parent_prs(repo_dir, f"{from_sha}..{to_sha}")))
 
 
 def head_sha(repo_dir, ref=CODE_REF):
@@ -165,11 +203,8 @@ def earliest_merged(repo_dir, pr_numbers, ref=CODE_REF):
     wanted = {int(n) for n in pr_numbers}
     if not wanted:
         return None
-    log = git(["log", "--first-parent", "--format=%H %s", ref], repo_dir)
     found = None
-    for line in log.splitlines():
-        sha, _, subject = line.partition(" ")
-        number = pr_number_of_subject(subject)
+    for sha, number in first_parent_prs(repo_dir, ref):
         if number in wanted:
             found = (number, sha)  # keep overwriting: git emits newest first, so the last is oldest
     return found
@@ -179,11 +214,8 @@ def find_merge_commit(repo_dir, pr_number, ref=CODE_REF):
     """The mainline commit that merged `pr_number`, or None.
 
     Used only for bootstrap, where an area's earliest labelled PR must be located in history.
-    Searching subjects is cheap and exact here because both merge-subject forms embed the number.
     """
-    log = git(["log", "--first-parent", "--format=%H %s", ref], repo_dir)
-    for line in log.splitlines():
-        sha, _, subject = line.partition(" ")
-        if pr_number_of_subject(subject.strip()) == pr_number:
+    for sha, number in first_parent_prs(repo_dir, ref):
+        if number == pr_number:
             return sha
     return None
