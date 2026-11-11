@@ -188,6 +188,20 @@ def test_the_pr_filter_is_honoured():
         assert names == {"TauCeti.alpha"}, sorted(names)
 
 
+def test_a_carried_pr_is_attributed_though_it_landed_before_the_window():
+    """`alpha` landed before `first`, the window's start; the plan carries #101 by its commit."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        got = facts.collect(tmp, first, second, pr_numbers=[102, 101], carried={first: 101},
+                            docs=docs_for(second))
+        by = {d["name"]: d["pr"] for d in got["declarations"]}
+        assert by == {"TauCeti.alpha": 101, "TauCeti.beta": 102}, by
+        assert {p["number"]: p["carried"] for p in got["prs"]} == {101: True, 102: False}, got["prs"]
+        # A carried commit the plan's list does not name is not attributed.
+        got = facts.collect(tmp, first, second, pr_numbers=[102], carried={first: 101}, docs=docs_for(second))
+        assert {d["name"] for d in got["declarations"]} == {"TauCeti.beta"}
+
+
 def test_docstrings_are_read_from_a_known_line():
     """doc-gen4's source range BEGINS at the docstring, so it is read from a position the
     documentation supplied rather than found by parsing."""
@@ -444,6 +458,26 @@ def test_cli_facts_passes_the_plan_filter():
         got = json.loads(out_file.read_text())
         names = {d["name"] for d in got["declarations"]}
         assert names == {"TauCeti.alpha"}, f"filter dropped: got {sorted(names)}"
+
+
+def test_cli_facts_passes_the_plan_s_carried_commits():
+    with tempfile.TemporaryDirectory() as tmp:
+        root, first, second = repo_with_two_prs(tmp)
+        plan = {"roadmap": "Algebra", "from_sha": first, "to_sha": second, "prs": [102, 101],
+                "carried": [{"number": 101, "sha": first, "landed": "2026-11-05T13:35:35+00:00"}]}
+        plan_file = pathlib.Path(tmp) / "plan.json"
+        out_file = pathlib.Path(tmp) / "facts.json"
+        plan_file.write_text(json.dumps(plan))
+        import progress.docs as docs_mod
+        real = docs_mod.Docs
+        docs_mod.Docs = lambda *a, **k: docs_for(second)
+        try:
+            rc = cli.main(["facts", "--plan", str(plan_file), "--code-dir", tmp, "--out", str(out_file)])
+        finally:
+            docs_mod.Docs = real
+        assert rc == 0, rc
+        names = {d["name"] for d in json.loads(out_file.read_text())["declarations"]}
+        assert names == {"TauCeti.alpha", "TauCeti.beta"}, sorted(names)
 
 
 def test_cli_facts_reports_a_refusal_as_an_error():

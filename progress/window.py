@@ -101,24 +101,31 @@ def pr_number_of_commit(subject, body="", repository=CODE_REPO):
     return source
 
 
-def first_parent_prs(repo_dir, rev, repository=CODE_REPO):
-    """`(sha, pr_number)` for every first-parent commit of `rev` that lands a PR, newest first.
+def first_parent_commits(repo_dir, rev, repository=CODE_REPO):
+    """`(sha, pr_number, in_subject)` for every first-parent commit of `rev`, newest first.
+
+    `pr_number` is None for a commit that lands no PR; `in_subject` says whether the subject carries
+    the number, which is False for a commit that cites its PR by `Source-PR` alone.
 
     `--first-parent` is deliberate: it walks the mainline only, so a PR's own internal commits
     (which may themselves mention other PR numbers) never leak into the result.
     """
     out = git(["log", "--first-parent", "-z", "--format=%H%x00%s%x00%b", rev], repo_dir)
     fields = out.split("\0")
-    found = []
+    rows = []
     for i in range(0, len(fields) - 2, 3):
         sha, subject, body = fields[i].strip(), fields[i + 1].strip(), fields[i + 2]
         try:
             number = pr_number_of_commit(subject, body, repository)
         except GitError as exc:
             raise GitError(f"commit {sha[:10]}: {exc}") from None
-        if number is not None:
-            found.append((sha, number))
-    return found
+        rows.append((sha, number, pr_number_of_subject(subject) is not None))
+    return rows
+
+
+def first_parent_prs(repo_dir, rev, repository=CODE_REPO):
+    """`(sha, pr_number)` for every first-parent commit of `rev` that lands a PR, newest first."""
+    return [(sha, n) for sha, n, _ in first_parent_commits(repo_dir, rev, repository) if n is not None]
 
 
 def is_ancestor(repo_dir, maybe_ancestor, descendant):

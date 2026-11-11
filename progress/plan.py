@@ -340,6 +340,42 @@ def area_window(repo_dir, area_prs, from_sha, to_sha):
     return [n for n in numbers if n in wanted]
 
 
+class PassedCitations:
+    """Mainline commits that cite their PR by `Source-PR` alone, by position on the chain to `to_sha`.
+
+    Readers before f406f1d saw only subjects, so a report whose window held such a commit left its
+    PR out and moved the cursor past it (TauCetiProgress#58). `behind` finds those for one roadmap,
+    so its next section can carry them. One history read serves every roadmap in a plan.
+    """
+
+    def __init__(self, repo_dir, to_sha):
+        self._repo_dir, self._to_sha, self._rows = repo_dir, to_sha, None
+
+    def _load(self):
+        if self._rows is None:
+            rows = window.first_parent_commits(self._repo_dir, self._to_sha)
+            self._position = {sha: i for i, (sha, _, _) in enumerate(rows)}
+            self._rows = [(i, sha, n) for i, (sha, n, in_subject) in enumerate(rows)
+                          if n is not None and not in_subject]
+
+    def behind(self, cursor, area_prs, reported, fresh=()):
+        """`{pr_number: sha}`, newest first: labelled, landed at or behind `cursor`, in no section.
+
+        `reported` is every number the roadmap's sections list. Unlike a window, this does trust
+        that list: a section claiming a number only stops that number being carried.
+        """
+        self._load()
+        at = self._position.get(cursor)
+        if at is None:
+            return {}  # a cursor off the first-parent chain: nothing can be placed behind it
+        skip = set(reported) | set(fresh)
+        found = {}
+        for i, sha, number in self._rows:
+            if i >= at and number in area_prs and number not in skip:
+                found.setdefault(number, sha)
+        return found
+
+
 def unaccounted_prs(repo_dir, area_prs, ref=CODE_REF):
     """Labelled pull requests that are in `ref`'s history but were not recognised in it.
 
@@ -558,6 +594,7 @@ def build_plan(
     candidates = []
     skipped = list(stale)
     notes = {}  # area -> why it is not a candidate, for the threshold table
+    passed = PassedCitations(code_dir, to_sha)
 
     def skip(area, message):
         skipped.append(message)
@@ -636,7 +673,12 @@ def build_plan(
         # label. That is cosmetic. Silently unreportable history is not, so the trade goes the other
         # way.
         fresh = area_window(code_dir, area_prs, from_sha, to_sha)
-        if not fresh:
+        # The one exception to the window being the only authority: work an earlier reader could
+        # not see. It rides in this section's `prs`, since the cursor cannot go back for it.
+        carried = {}
+        if not bootstrapped:
+            carried = passed.behind(from_sha, area_prs, files.reported_prs(progress_text), fresh)
+        if not fresh and not carried:
             skip(area, f"{area}: nothing new since {from_sha[:7]}")
             continue
 
@@ -645,7 +687,8 @@ def build_plan(
                 "area": area,
                 "rel_dir": rel_dir,
                 "from_sha": from_sha,
-                "prs": fresh,
+                "prs": fresh + list(carried),
+                "carried": carried,
                 "bootstrapped": bootstrapped,
                 "status_text": status_text,
                 "progress_text": progress_text,
@@ -686,6 +729,10 @@ def build_plan(
         "from_sha": best["from_sha"],
         "to_sha": to_sha,
         "prs": best["prs"],
+        "carried": [
+            {"number": n, "sha": sha, "landed": window.commit_date(code_dir, sha)}
+            for n, sha in best["carried"].items()
+        ],
         "bootstrapped": best["bootstrapped"],
         "reason": reason,
         "strategy": strategy,
@@ -772,7 +819,9 @@ def _choose_by_threshold(areas, candidates, notes, roadmap_dir, to_sha, now, thr
         unassessed = sum(1 for c in ranked if not c["assessed"])
         rank = (f"unassessed roadmaps go first; the largest N+T ({best['score']:.1f}) of {unassessed} "
                 f"unassessed among {len(ranked)} qualifying roadmap(s)")
-    reason = f"{best['area']} has {len(best['prs'])} PR(s) since {best['from_sha'][:7]}, {since} ({best['note']}); {rank}"
+    carried = f" ({len(best['carried'])} carried from before it)" if best.get("carried") else ""
+    reason = (f"{best['area']} has {len(best['prs'])} PR(s) since {best['from_sha'][:7]}{carried}, {since} "
+              f"({best['note']}); {rank}")
     return best, ranked, reason
 
 

@@ -136,12 +136,15 @@ def unchanged_since(repo_dir):
     return ok
 
 
-def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
+def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, carried=None):
     """The factual spine of a window.
 
     `to_sha` is the documented window end chosen by the plan. The documentation must still describe
     that commit when facts are collected: accepting an older build would advance the report's cursor
     past pull requests whose declarations were never inspected.
+
+    `carried` is `{sha: pr_number}` for the plan's pull requests that landed before `from_sha`; their
+    commits are attributed like the window's own.
     """
     from .docs import Docs, DocsError, DocsNotFound
 
@@ -166,6 +169,8 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
     for sha, n in window.first_parent_prs(repo_dir, f"{from_sha}..{docs_sha}"):
         if n in wanted:
             pr_of_commit[sha] = n
+    carried = {sha: n for sha, n in (carried or {}).items() if n in wanted}
+    pr_of_commit.update(carried)
 
     files = changed_lean_files(repo_dir, pr_of_commit)
     truncated_modules = 0
@@ -241,7 +246,8 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None):
         keep = names[:MAX_DECLS_PER_PR]
         dropped += len(names) - len(keep)
         prs.append({"number": number, "declarations": keep,
-                    "truncated_declarations": len(names) - len(keep)})
+                    "truncated_declarations": len(names) - len(keep),
+                    "carried": number in carried.values()})
 
     # Documented declarations first: one is more likely to be a result worth naming than an
     # undocumented helper. A presentation order, not a judgement.

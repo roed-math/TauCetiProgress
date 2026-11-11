@@ -259,7 +259,8 @@ def test_under_threshold_anyone_s_fresh_report_holds_its_area():
              "headRepositoryOwner": {"login": "ldct"}}
     repo, _areas = _setup([("Busy", "TauCetiRoadmap/Busy", 20.0), ("Old", "TauCetiRoadmap/Old", 20.0)])
     saved = (plan.docs_source_commit, window_mod.head_sha, window_mod.is_ancestor, plan.area_window,
-             gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date)
+             gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date,
+             window_mod.first_parent_commits, plan.files.reported_prs)
     plan.docs_source_commit = lambda: "b" * 40
     window_mod.head_sha = lambda *a, **k: "b" * 40
     window_mod.is_ancestor = lambda *a, **k: True
@@ -268,6 +269,8 @@ def test_under_threshold_anyone_s_fresh_report_holds_its_area():
     plan.read_area_files = lambda roadmap_dir, rel_dir: ("status", "log")
     plan.files.cursor = lambda text: "a" * 40
     window_mod.commit_date = lambda *a, **k: "2026-09-30T00:00:00+00:00"
+    window_mod.first_parent_commits = lambda *a, **k: []
+    plan.files.reported_prs = lambda text: set()
     try:
         try:
             p = plan.build_plan(repo, repo, open_prs=[fresh, stale], now=NOW, strategy="threshold")
@@ -278,14 +281,16 @@ def test_under_threshold_anyone_s_fresh_report_holds_its_area():
         assert any("#493" in s and "no longer marks the area in flight" in s for s in p["skipped"]), p["skipped"]
     finally:
         (plan.docs_source_commit, window_mod.head_sha, window_mod.is_ancestor, plan.area_window,
-         gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date) = saved
+         gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date,
+             window_mod.first_parent_commits, plan.files.reported_prs) = saved
 
 
 def test_a_skipped_area_is_never_chosen():
     from progress import window as window_mod
     repo, _areas = _setup([("Busy", "TauCetiRoadmap/Busy", 20.0), ("Old", "TauCetiRoadmap/Old", 30.0)])
     saved = (plan.docs_source_commit, window_mod.head_sha, window_mod.is_ancestor, plan.area_window,
-             gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date)
+             gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date,
+             window_mod.first_parent_commits, plan.files.reported_prs)
     plan.docs_source_commit = lambda: "b" * 40
     window_mod.head_sha = lambda *a, **k: "b" * 40
     window_mod.is_ancestor = lambda *a, **k: True
@@ -294,6 +299,8 @@ def test_a_skipped_area_is_never_chosen():
     plan.read_area_files = lambda roadmap_dir, rel_dir: ("status", "log")
     plan.files.cursor = lambda text: "a" * 40
     window_mod.commit_date = lambda *a, **k: "2026-09-30T00:00:00+00:00"
+    window_mod.first_parent_commits = lambda *a, **k: []
+    plan.files.reported_prs = lambda text: set()
     try:
         assert plan.build_plan(repo, repo, open_prs=[], now=NOW, strategy="threshold")["roadmap"] == "Old"
         p = plan.build_plan(repo, repo, open_prs=[], now=NOW, strategy="threshold", skip_areas={"Old"})
@@ -307,7 +314,8 @@ def test_a_skipped_area_is_never_chosen():
             raise AssertionError("every area skipped, so NotDue")
     finally:
         (plan.docs_source_commit, window_mod.head_sha, window_mod.is_ancestor, plan.area_window,
-         gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date) = saved
+         gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date,
+             window_mod.first_parent_commits, plan.files.reported_prs) = saved
 
 
 # ----- assessment_gap: what the Progress page shows as unassessed --------------------------------
