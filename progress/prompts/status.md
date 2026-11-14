@@ -68,7 +68,7 @@ results. Link every selected named result and notable definition whose URL appea
 material. Use a markdown link whose target is that URL, copied exactly:
 
     the **Hungerbühler-Wasem residue theorem**
-    ([`residue_theorem_of_generalized_winding`](https://taucetiproject.org/docs/TauCeti/Analysis/Contour/Residue/Generalized.html#TauCeti.Contour.residue_theorem_of_generalized_winding))
+    ([`residue_theorem_of_generalized_winding`](https://taucetiproject.github.io/TauCeti/docs/TauCeti/Analysis/Contour/Residue/Generalized.html#TauCeti.Contour.residue_theorem_of_generalized_winding))
 
 Rules:
 

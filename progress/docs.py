@@ -34,7 +34,8 @@ import time
 import urllib.error
 import urllib.request
 
-DOCS_BASE = "https://taucetiproject.org/docs"
+# taucetiproject.org stopped serving /docs on 2026-11-12, when the domain moved to the website repo.
+DOCS_BASE = os.environ.get("TAUCETI_DOCS_URL", "https://taucetiproject.github.io/TauCeti/docs")
 INDEX_PATH = "declarations/declaration-data.bmp"
 # The commit the deployed tree documents. TauCeti's deploy stamps it into the tree (pages.yml, "Fold
 # the API docs into the site"), and says that anything needing certainty should read it rather than

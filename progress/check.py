@@ -35,9 +35,10 @@ SECTION_WORDS = 300
 SECTION_PARAGRAPHS = 3
 STATUS_HEADINGS = ["## Where this roadmap stands", "## The frontier"]
 
-# The documentation moved from GitHub Pages to taucetiproject.org on 2026-10-08. Reports written
-# before then link to the old host, which redirects, so a link on either host is a documentation link.
-DOCS_BASES = (DOCS_BASE, "https://taucetiproject.github.io/TauCeti/docs")
+# The documentation was on GitHub Pages, on taucetiproject.org from 2026-10-08 to 2026-11-12, and on
+# GitHub Pages again since. A report may link any of them.
+DOCS_BASES = tuple(dict.fromkeys((DOCS_BASE, "https://taucetiproject.org/docs",
+                                  "https://taucetiproject.github.io/TauCeti/docs")))
 DOCS_URL_RE = re.compile(r"https://taucetiproject\.(?:org|github\.io)/[^\s)>\]\"'`]+")
 ASSESSED = ("done", "partial", "untouched")
 
