@@ -175,7 +175,7 @@ def reachable_commits(repo_dir, revision, *, first_parent=False):
 
 
 def first_parent_sources(repo_dir, revision, *, repository=None, legacy_repository=None, legacy_through=None,
-                         migration=None, include_uncited=False):
+                         migration=None, include_uncited=False, repository_id=None):
     """Qualified citations from complete commit messages, newest first.
 
     NUL framing preserves body lines; a repair may have appended notes after its
@@ -248,7 +248,7 @@ def _sources(rows, legacy_repository, migration=None, *, include_uncited=False, 
 
 
 def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=None, legacy_through=None,
-                     migration=None, include_uncited=False):
+                     migration=None, include_uncited=False, repository_id=None):
     """Current-source numbers only after origin checking or an explicit import map.
 
     A citation from a commit-attributed source (`provenance.commit_sources`) has no report number;
@@ -281,7 +281,7 @@ def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=N
             continue
         try:
             try:
-                number = migration.number(citation, repository)
+                number = migration.number(citation, repository, repository_id)
             except ProvenanceError:
                 if (citation.repository.key, citation.native_id) not in sources:
                     raise
@@ -295,7 +295,8 @@ def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=N
     return out
 
 
-def window_prs(repo_dir, from_sha, to_sha, *, repository=None, legacy_repository=None, legacy_through=None, migration=None):
+def window_prs(repo_dir, from_sha, to_sha, *, repository=None, legacy_repository=None, legacy_through=None, migration=None,
+               repository_id=None):
     """PR numbers merged in `(from_sha, to_sha]`, newest first.
 
     `--first-parent` is deliberate: it walks the mainline only, so a PR's own internal commits
@@ -307,7 +308,8 @@ def window_prs(repo_dir, from_sha, to_sha, *, repository=None, legacy_repository
             f"this history (rewritten branch, or a cursor from another repository)"
         )
     rows = first_parent_prs(repo_dir, f"{from_sha}..{to_sha}", repository=repository,
-                           legacy_repository=legacy_repository, legacy_through=legacy_through, migration=migration)
+                           legacy_repository=legacy_repository, legacy_through=legacy_through, migration=migration,
+                           repository_id=repository_id)
     return list(dict.fromkeys(number for _sha, number in rows))
 
 
@@ -334,7 +336,7 @@ def commit_date(repo_dir, sha):
 
 
 def earliest_merged(repo_dir, pr_numbers, ref=CODE_REF, *, repository=None, legacy_repository=None,
-                    legacy_through=None, migration=None):
+                    legacy_through=None, migration=None, repository_id=None):
     """`(pr_number, merge_sha)` for whichever of `pr_numbers` merged EARLIEST, or None.
 
     Earliest by position on the first-parent chain, which is the only ordering that matters here.
@@ -353,21 +355,23 @@ def earliest_merged(repo_dir, pr_numbers, ref=CODE_REF, *, repository=None, lega
         return None
     found = None
     for sha, number in first_parent_prs(repo_dir, ref, repository=repository,
-                                       legacy_repository=legacy_repository, legacy_through=legacy_through, migration=migration):
+                                       legacy_repository=legacy_repository, legacy_through=legacy_through, migration=migration,
+                                       repository_id=repository_id):
         if number in wanted:
             found = (number, sha)  # keep overwriting: git emits newest first, so the last is oldest
     return found
 
 
 def find_merge_commit(repo_dir, pr_number, ref=CODE_REF, *, repository=None, legacy_repository=None,
-                      legacy_through=None, migration=None):
+                      legacy_through=None, migration=None, repository_id=None):
     """The mainline commit that merged `pr_number`, or None.
 
     Used only for bootstrap, where an area's earliest labelled PR must be located in history.
     Qualified provenance and historical subjects use the same attribution as window and facts reads.
     """
     for sha, number in first_parent_prs(repo_dir, ref, repository=repository,
-                                       legacy_repository=legacy_repository, legacy_through=legacy_through, migration=migration):
+                                       legacy_repository=legacy_repository, legacy_through=legacy_through, migration=migration,
+                                       repository_id=repository_id):
         if number == pr_number:
             return sha
     return None

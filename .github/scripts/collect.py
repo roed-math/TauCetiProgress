@@ -46,7 +46,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 
-from progress import files, gate, gh as gh_mod, plan as plan_mod, window  # noqa: E402
+from progress import commit_attribution, files, gate, gh as gh_mod, plan as plan_mod, window  # noqa: E402
 
 # Where the reported window has to live. `to_sha` is checked for reachability from this branch, which
 # tracks the newest TauCeti commit with published documentation.
@@ -158,7 +158,7 @@ def rev_parse(repo, ref):
 
 
 @window.history_round
-def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
+def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF, areas=None, upto=None):
     """The legitimate first-report cursor, or None when source history is unavailable.
 
     Invalid protected history configuration is fatal; it must not produce an empty bundle.
@@ -180,12 +180,15 @@ def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
     streamed and memoized for this call; unrelated message bodies are discarded. This is not a checkout of pull-request content --
     it is the upstream code repository, nothing from the pull request reaches it, and nothing in it is
     executed.
+
+    `areas`, every roadmap on the base branch, and `upto`, the report's `to_sha`, let commit-attributed
+    pull requests compete for the first place exactly as they do in the planner (`bootstrap_from_clone`).
     """
     try:
         labelled = gh_mod.closed_prs_for_area(area, repo=repo)
     except (gh_mod.GhError, KeyError, TypeError, ValueError):
         return None
-    if not labelled:
+    if not labelled and not areas:
         return None
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -197,17 +200,49 @@ def bootstrap_cursor(area, repo=CODE_REPO, ref=CODE_REF):
         )
         if cloned.returncode != 0:
             return None
-        try:
-            # The same refusal the planner makes, from the same helper: a labelled pull request that
-            # is in this history but unrecognised in it would otherwise move the cursor past itself.
-            if plan_mod.unaccounted_prs(clone, labelled, ref=ref):
+        return bootstrap_from_clone(clone, area, labelled, ref=ref, areas=areas, upto=upto)
+
+
+def bootstrap_from_clone(clone, area, labelled, ref=CODE_REF, areas=None, upto=None):
+    """`bootstrap_cursor` on a full-history clone, through the planner's own `bootstrap_from_sha`.
+
+    The planner classifies commit-attributed pull requests through the documented commit it reports
+    to, against every roadmap. Without both of those it cannot be reproduced, so the answer is None.
+    """
+    try:
+        tip = window.head_sha(clone, ref)
+        attribution = commit_attribution.Attribution(clone, areas or (), tip=tip)
+        first = {}
+        if attribution.enabled:
+            if not areas or not upto or not window.has_commit(clone, upto) \
+                    or not window.is_ancestor(clone, upto, tip):
                 return None
-            found = window.earliest_merged(clone, labelled, ref=ref)
-            if found is None:
-                return None
-            return window.first_parent_before(clone, found[1])
-        except (window.GitError, gh_mod.GhError):
-            return None
+            first = attribution.through(area, upto)
+        # The planner's refusals come with it: a labelled pull request in this history but unrecognised
+        # in it would otherwise move the cursor past itself.
+        return plan_mod.bootstrap_from_sha(clone, area, labelled, ref=ref, commit_prs=first)
+    except (window.GitError, gh_mod.GhError):
+        return None
+
+
+def roadmap_areas(repo, sha):
+    """Every roadmap at `sha` by the planner's rule, or None when the tree cannot be read whole."""
+    try:
+        tree = gh_api(f"repos/{repo}/git/trees/{sha}?recursive=1")
+    except CollectError:
+        return None
+    if tree.get("truncated"):
+        return None
+    return set(plan_mod.areas_from_paths(
+        e.get("path") or "" for e in tree.get("tree") or [] if e.get("type") == "blob"))
+
+
+def report_to_sha(new_progress):
+    try:
+        sections = files.parse_sections(new_progress or "")
+    except files.FormatError:
+        return None
+    return sections[-1]["to_sha"] if sections else None
 
 
 def compare_status(repo, base, head):
@@ -380,7 +415,8 @@ def main(argv=None):
             except gate.Refused:
                 pass  # The pure gate reports the policy mismatch before checking the cursor.
             else:
-                expected_bootstrap = bootstrap_cursor(area)
+                expected_bootstrap = bootstrap_cursor(area, areas=roadmap_areas(args.repo, main_sha),
+                                                      upto=report_to_sha(new_progress))
 
     bundle = {
         "base_repo": args.repo,

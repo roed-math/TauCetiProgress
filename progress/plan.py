@@ -98,6 +98,22 @@ def discover_areas(roadmap_dir):
     return found
 
 
+def areas_from_paths(paths):
+    """`discover_areas` over a repository's file paths, for a caller holding a tree, not a checkout."""
+    paths = set(paths)
+    inner = any(path.startswith(AREAS_DIR + "/") for path in paths)
+    found = {}
+    for prefix in ((AREAS_DIR if inner else ""), COMPLETED_DIR):
+        depth = 3 if prefix else 2
+        names = sorted(
+            parts[-2] for parts in (path.split("/") for path in paths)
+            if len(parts) == depth and parts[-1] == "README.md" and (not prefix or parts[0] == prefix)
+        )
+        for name in names:
+            found[name] = f"{prefix}/{name}" if prefix else name
+    return found
+
+
 def read_area_layers(roadmap_dir, rel_dir):
     """`(layers, readme_sha)` for one area: the README's layer headings and the hash of its text.
 
@@ -366,7 +382,7 @@ def area_window(repo_dir, area_prs, from_sha, to_sha, commit_prs=(), **history):
 
     Attribution is an intersection: git says which PRs are in the range, one label query says
     which PRs belong to the area. Order comes from git (newest first). `commit_prs` are the area's
-    commit-attributed keys (`commit_attribution.area_prs`), which stand in for labels.
+    commit-attributed keys (`commit_attribution.Attribution.in_window`), which stand in for labels.
     """
     revision = window.immutable_revision(repo_dir, f"{from_sha}..{to_sha}")
     from_sha, to_sha = revision.split("..")
@@ -469,6 +485,26 @@ def _earliest_labelled(repo_dir, area, area_prs, ref, **history):
     # complete checkout, unaccounted_prs already ruled out an unrecognised merge in this history.
     # Defer this area until one of its merges reaches ref; do not invent or advance a cursor.
     return None if found is None else found[1]
+
+
+def _first_attributed(attribution, area, area_prs, to_sha, skipped):
+    """An unreported area's commit-attributed pull requests through `to_sha`, or None to skip it.
+
+    This is the one read of history before any cursor. An unreadable commit in it still aborts a
+    labelled area's plan, as the labelled bootstrap's own scan would; an area only commit
+    attribution could start is set aside instead, since nothing would advance past it.
+    """
+    try:
+        first = attribution.through(area, to_sha)
+    except window.GitError as exc:
+        if area_prs:
+            raise
+        skipped.append(f"{area}: its first window cannot be placed ({exc})")
+        return None
+    if not area_prs and not first:
+        skipped.append(f"{area}: no merged PRs yet")
+        return None
+    return first
 
 
 def _own_login():
@@ -672,22 +708,23 @@ def build_plan(
 
     # Commit-attributed pull requests have no label history; their commits are classified instead,
     # against every roadmap so that a pull request naming another area is not credited here.
-    from .commit_attribution import area_prs as commit_area_prs
+    from .commit_attribution import Attribution
 
-    attributed = commit_area_prs(code_dir, window.first_parent_prs(code_dir, tip, **history),
-                                 all_areas) if eligible else {}
+    attribution = Attribution(code_dir, all_areas, tip=tip, history=history)
 
     def consider(area):
         rel_dir, status_text, progress_text, from_sha = eligible[area]
         area_prs = histories[area]
-        commit_prs = attributed.get(area, {})
-        if not area_prs and not commit_prs:
+        if not area_prs and not attribution.enabled:
             skipped.append(f"{area}: no merged PRs yet")
             return
 
         bootstrapped = False
         if from_sha is None:
-            from_sha = bootstrap_from_sha(code_dir, area, area_prs, ref=ref, commit_prs=commit_prs, **history)
+            first = _first_attributed(attribution, area, area_prs, to_sha, skipped)
+            if first is None:
+                return
+            from_sha = bootstrap_from_sha(code_dir, area, area_prs, ref=ref, commit_prs=first, **history)
             bootstrapped = True
             if from_sha is None:
                 skipped.append(f"{area}: no labelled merges in {ref} yet; waiting for documentation")
@@ -736,6 +773,11 @@ def build_plan(
         # The failure it guarded against is a PR appearing in two reports after someone changed its
         # label. That is cosmetic. Silently unreportable history is not, so the trade goes the other
         # way.
+        commit_prs = (attribution.in_window(area, from_sha, to_sha)
+                      if window.is_ancestor(code_dir, from_sha, to_sha) else {})
+        if not area_prs and not commit_prs:
+            skipped.append(f"{area}: no merged PRs yet")
+            return
         fresh = area_window(code_dir, area_prs, from_sha, to_sha, commit_prs, **history)
         if not fresh:
             skipped.append(f"{area}: nothing new since {from_sha[:7]}")

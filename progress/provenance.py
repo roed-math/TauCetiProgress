@@ -43,9 +43,13 @@ class PullSource:
             raise ProvenanceError("source citation needs a qualified repository and positive PR number")
 
     @property
+    def namespace(self):
+        """The repository this number belongs to: its URL, and its native ID when cited."""
+        return self.repository.key + ("" if self.native_id is None else f"@{self.native_id}")
+
+    @property
     def key(self):
-        native = "" if self.native_id is None else f"@{self.native_id}"
-        return f"{self.repository.key}{native}#{self.number}"
+        return f"{self.namespace}#{self.number}"
 
     def __hash__(self):
         return hash(self.key)
@@ -160,7 +164,7 @@ class MigrationMap:
                 raise ProvenanceError("migration entries must be qualified source citations")
             if before in self._mapping or after in targets:
                 raise ProvenanceError("migration map contains duplicate source or destination citations")
-            if before.repository.key == after.repository.key:
+            if before.namespace == after.namespace:
                 raise ProvenanceError("migration entries must cross repository namespaces")
             self._mapping[before] = after
             targets.add(after)
@@ -224,13 +228,26 @@ class MigrationMap:
     def empty(self):
         return not self._mapping and not self.commits
 
-    def number(self, citation, repository):
-        if citation.repository.key == repository.key:
+    def number(self, citation, repository, repository_id=None):
+        if same_source(citation, repository, repository_id):
             return citation.number
         mapped = self._mapping.get(citation)
-        if mapped is None or mapped.repository.key != repository.key:
+        if mapped is None or not same_source(mapped, repository, repository_id):
             raise ProvenanceError("foreign source citation needs an explicit migration to the report repository")
         return mapped.number
+
+
+def same_source(citation, repository, repository_id=None):
+    """Whether `citation` numbers a pull request of the report repository.
+
+    The URL must match. A cited native ID must also equal `repository_id`, the report repository's
+    own, so a recreated repository of the same name never inherits its predecessor's numbers; an
+    unknown `repository_id` matches no cited ID. A citation without one (a bare subject, or a writer
+    that records none) is matched by URL alone.
+    """
+    return citation.repository.key == repository.key and (
+        citation.native_id is None or citation.native_id == repository_id
+    )
 
 
 def configured_migration():

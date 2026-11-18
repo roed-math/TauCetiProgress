@@ -204,7 +204,7 @@ class BorsTests(unittest.TestCase):
 
         with patch.object(gh, "gh", side_effect=self.github), \
              patch.object(subprocess, "run", side_effect=run):
-            cursor = collect.bootstrap_cursor("PDE", ref="main")
+            cursor = collect.bootstrap_cursor("PDE", ref="main", areas={"PDE"}, upto=window.head_sha(self.code, "main"))
         self.assertEqual(cursor, self.root)
 
     def test_query_failure_does_not_become_empty_history(self):
@@ -222,7 +222,7 @@ class BorsTests(unittest.TestCase):
                 args = [*args[:-2], str(self.code), args[-1]]
             return real_run(args, **kwargs)
         with patch.object(gh, "gh", side_effect=self.github), patch.object(subprocess, "run", side_effect=run):
-            cursor = collect.bootstrap_cursor("PDE", ref="main")
+            cursor = collect.bootstrap_cursor("PDE", ref="main", areas={"PDE"}, upto=window.head_sha(self.code, "main"))
         self.assertEqual(cursor, window.first_parent_before(self.code, sha))
 
     def test_batched_histories_keep_independent_complete_connections(self):

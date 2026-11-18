@@ -1,5 +1,6 @@
 """Pull requests from a commit-attributed source are reported from their merged commits."""
 
+import importlib.util
 import os
 import pathlib
 import subprocess
@@ -13,6 +14,11 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from progress import apply, commit_attribution, docs, files, gh, plan, window
 from progress.provenance import COMMIT_SOURCES_ENV, ProvenanceError, PullSource, commit_sources
+
+_spec = importlib.util.spec_from_file_location(
+    "collect", pathlib.Path(__file__).resolve().parents[1] / ".github" / "scripts" / "collect.py")
+collect = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(collect)
 
 SOURCE = "forgejo:https://forge.example/team/Math@7"
 
@@ -52,8 +58,13 @@ class CommitAttribution(unittest.TestCase):
                        capture_output=True)
         return window.git(["rev-parse", "HEAD"], self.code).strip()
 
-    def plan(self, labels, area):
-        documented = window.head_sha(self.code, "main")
+    def report(self, area, to_sha):
+        """Give `area` a recorded cursor at `to_sha`."""
+        section = files.render_section(area, self.initial, to_sha, [1], "window", "body")
+        (self.roadmap / "TauCetiRoadmap" / area / "PROGRESS.md").write_text(files.new_progress_file(area) + section)
+
+    def plan(self, labels, area, documented=None):
+        documented = documented or window.head_sha(self.code, "main")
         reader = SimpleNamespace(source_commit=lambda: documented, generation="pages/test",
                                  require_coverage=lambda paths: None, pin=lambda: {"source_commit": documented})
         with patch.object(docs, "discover", lambda: reader), \
@@ -107,8 +118,8 @@ class CommitAttribution(unittest.TestCase):
         self.commit(forgejo(35, "Surfaces"), ["TauCeti/S.lean"])
         self.commit(forgejo(35, "Curves"), ["TauCeti/S2.lean"])  # its two commits disagree
         self.commit("feat: labelled (#6)", ["TauCeti/Z.lean"])
-        rows = window.first_parent_prs(self.code, "main")
-        got = commit_attribution.area_prs(self.code, rows, {"Curves", "Surfaces"})
+        attribution = commit_attribution.Attribution(self.code, {"Curves", "Surfaces"})
+        got = {area: attribution.through(area, "main") for area in ("Curves", "Surfaces")}
         # A pull request split over queue commits is placed by its earliest one.
         self.assertEqual(got, {"Curves": {key(31): curves}, "Surfaces": {key(34): first}})
 
@@ -145,6 +156,68 @@ class CommitAttribution(unittest.TestCase):
             header = section.replace(f'"{key(31)}"', '"' + bad.replace('"', '') + '"')
             with self.assertRaises(files.FormatError, msg=bad):
                 files.parse_sections(header)
+
+    def test_the_collector_places_a_first_report_where_the_planner_does(self):
+        native = self.commit(forgejo(34, "Surfaces"), ["TauCeti/S.lean"])
+        self.commit("feat: labelled (#5)", ["TauCeti/A.lean"])
+        self.commit(forgejo(31, "Curves"), ["TauCeti/C.lean"])
+        tip = window.head_sha(self.code, "main")
+        areas = set(plan.discover_areas(self.roadmap))
+        for area, labels in (("Surfaces", {5: None}), ("Curves", {})):
+            planned = self.plan({"Surfaces": [5]}, area)["from_sha"]
+            collected = collect.bootstrap_from_clone(self.code, area, labels, ref="main", areas=areas, upto=tip)
+            self.assertEqual(collected, planned, area)
+        self.assertEqual(window.first_parent_before(self.code, native), self.initial)
+        # Without the roadmap list or the report's end it cannot reproduce the planner, so it refuses.
+        self.assertIsNone(collect.bootstrap_from_clone(self.code, "Curves", {}, ref="main", areas=None, upto=tip))
+        self.assertIsNone(collect.bootstrap_from_clone(self.code, "Curves", {}, ref="main", areas=areas, upto=None))
+
+    def test_unrelated_history_outside_the_window_cannot_stop_a_report(self):
+        bad = "feat: broken ({n})\n\nSource-PR: not a citation"
+        self.commit(bad.format(n="#9"), ["TauCeti/Old.lean"])  # before the cursor
+        one = self.commit("feat: labelled (#1)", ["TauCeti/A.lean"])
+        two = self.commit("feat: labelled (#2)", ["TauCeti/B.lean"])
+        self.commit(bad.format(n="#3"), ["TauCeti/New.lean"])  # after the documented commit
+        self.report("Curves", one)
+        for sources in (SOURCE, ""):
+            with patch.dict(os.environ, {COMMIT_SOURCES_ENV: sources}):
+                got = self.plan({"Curves": [1, 2]}, "Curves", documented=two)
+                self.assertEqual((got["from_sha"], got["prs"]), (one, [2]), sources)
+        # An unreported area only commit attribution could start is set aside, not the whole plan.
+        got = self.plan({"Curves": [1, 2]}, None, documented=two)
+        self.assertEqual(got["roadmap"], "Curves")
+        self.assertTrue(any(s.startswith("Surfaces: its first window cannot be placed") for s in got["skipped"]),
+                        got["skipped"])
+
+    def test_a_split_pull_request_is_classified_alike_on_both_sides_of_a_cursor(self):
+        self.commit(forgejo(34, "Surfaces"), ["TauCeti/S.lean"])
+        middle = self.commit(forgejo(34, "Surfaces"), ["scripts/tool.py"])
+        tip = self.commit(forgejo(34, "Surfaces"), ["TauCeti/T.lean"])
+        attribution = commit_attribution.Attribution(self.code, {"Surfaces"}, tip=tip)
+        # Each part alone would read as roadmap work; with its infrastructure commit it is none.
+        self.assertEqual(attribution.in_window("Surfaces", middle, tip), {})
+        self.assertEqual(commit_attribution.Attribution(self.code, {"Surfaces"}, tip=middle)
+                         .in_window("Surfaces", self.initial, window.first_parent_before(self.code, middle)), {})
+
+    def test_a_cited_native_id_must_be_the_report_repository_s_own(self):
+        from progress.native_source import history_options_from_record
+        from progress.provenance import MigrationMap
+
+        record = {"schema": "tauceti-progress.source/v1", "legacy_content": None, "legacy_through": None,
+                  "content": {"forge": {"kind": "forgejo", "url": "https://forge.example"}, "name": "team/Math", "id": 8},
+                  "roadmap": {"forge": {"kind": "forgejo", "url": "https://forge.example"}, "name": "team/Map", "id": 9}}
+        history = history_options_from_record(record)
+        self.assertEqual(history["repository_id"], 8)
+        ours = self.commit(f"feat: ours (#40)\n\nSource-PR: forgejo:https://forge.example/team/Math@8#40", ["TauCeti/O.lean"])
+        tip = self.commit(forgejo(31, "Curves"), ["TauCeti/P.lean"])  # the predecessor, ID 7
+        with patch.dict(os.environ, {COMMIT_SOURCES_ENV: ""}):
+            with self.assertRaisesRegex(window.GitError, "explicit migration"):
+                window.window_prs(self.code, self.initial, tip, **history)
+            self.assertEqual(window.window_prs(self.code, self.initial, ours, **history), [40])
+            mapping = MigrationMap.parse({"schema": "tauceti-progress.migration/v1", "mappings": [
+                {"from": f"{SOURCE}#31", "to": "forgejo:https://forge.example/team/Math@8#103"}]})
+            self.assertEqual(window.window_prs(self.code, self.initial, tip, **history, migration=mapping), [103, 40])
+        self.assertEqual(window.window_prs(self.code, self.initial, tip, **history), [key(31), 40])
 
 
 def facts_commits(code, start, end, numbers):

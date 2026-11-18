@@ -16,7 +16,11 @@ The forge kind, origin and repository name remain part of the citation. PR 7 on
 GitHub and PR 7 on two Forgejo origins are three different objects. A queue may
 also name the repository's native ID, `forgejo:https://forge.example/team/Math@3#7`;
 the ID is then part of the citation, so a recreated repository of the same name
-is a different source. Only complete
+is a different source. A cited ID numbers a report-repository pull request only
+when it equals that repository's own (`repository_id`, carried by native source
+bindings); otherwise the citation is foreign, and a migration between the two
+same-name repositories is allowed. A citation without an ID matches by URL.
+Only complete
 trailers matching the queue's grammar count; prose and empty or lookalike fields
 are ignored. Malformed or conflicting recognized citations, or disagreement with
 the subject number, abort the read.
@@ -50,9 +54,19 @@ subject paragraph as the description, and the commit's first-parent paths as
 the diff. A pull request the queue landed as several commits is classified on
 the union of their paths, once per message, and counts only if every message
 agrees. `roadmap/none` and `roadmap/Unknown` count for no roadmap, as those
-labels do. Its earliest commit competes with the labelled merges to start a
-roadmap's first window. Classification needs no forge read: the whole mainline
-takes about a second, with rename detection off.
+labels do. Classification needs no forge read, and rename detection stays off.
+
+Only the history a report needs is read, through `commit_attribution.Attribution`
+(one per planning round): an area's window, or, for an area with no cursor, all
+first-parent history through the documented commit, where its earliest
+commit-attributed pull request competes with the labelled merges to start the
+first window. A pull request split across a window boundary is read across up to
+32 consecutive commits on either side, so neighbouring windows classify it alike.
+Provenance errors outside those reads cannot stop a report, and an unreported
+area that only commit attribution could start is set aside when its history is
+unreadable. Disabled, nothing extra is read. The merge collector computes a first
+report's cursor with the same functions, given the base branch's roadmaps and the
+report's `to_sha`; without either it refuses.
 
 `MigrationMap.parse()` accepts this versioned, one-to-one correspondence:
 

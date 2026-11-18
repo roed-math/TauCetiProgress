@@ -12,10 +12,13 @@ import os
 import subprocess
 
 from . import git_history, window
+from .provenance import ProvenanceError, commit_source, commit_sources
 
 LABEL_PREFIX = "roadmap/"
 CHUNK = 500
 MAX_CACHED = 100_000
+# Longest run of consecutive commits one queued pull request is read across at a range boundary.
+MAX_SPLIT = 32
 _cache = {}
 
 
@@ -69,31 +72,93 @@ def read_commits(repo_dir, shas):
     return found
 
 
-def area_prs(repo_dir, rows, areas):
-    """`{area: {key: earliest_sha}}` for the commit-attributed keys among `first_parent_prs` rows.
+class Attribution:
+    """Commit attribution for one planning round, read from `first_parent_prs` rows.
 
-    Rows are newest first, and only string keys are commit-attributed. A pull request the queue
-    landed as several commits is classified on the union of their paths, once per commit message,
-    and is kept only when every message names the same roadmap. `roadmap/none` and
-    `roadmap/Unknown` name none, exactly as those labels do.
+    Only the history a report needs is read: its window, or for a roadmap's first report all history
+    through the documented commit. With no commit source configured nothing is read and every answer
+    is empty. Each pull request is classified once a round, however many windows it falls in.
     """
-    groups = {}
-    for sha, key in rows:
-        if isinstance(key, str):
-            groups.setdefault(key, []).append(sha)
-    if not groups:
-        return {}
-    commits = read_commits(repo_dir, [sha for group in groups.values() for sha in group])
-    areas = set(areas)
-    classify = _labeller().classify
-    out = {}
-    for key, group in groups.items():
-        paths = sorted({path for sha in group for path in commits[sha][2]})
-        labels = {classify(commits[sha][0], commits[sha][1], paths, areas) for sha in group}
-        if len(labels) != 1:
-            continue
-        label = labels.pop()
-        area = label[len(LABEL_PREFIX):] if label.startswith(LABEL_PREFIX) else None
-        if area in areas:
-            out.setdefault(area, {})[key] = group[-1]
-    return out
+
+    def __init__(self, repo_dir, areas, *, tip=None, history=None):
+        try:
+            self.enabled = bool(commit_sources())
+        except ProvenanceError as error:
+            raise window.GitError(str(error)) from None
+        self.repo_dir, self.areas, self.tip = repo_dir, set(areas), tip
+        self.history = dict(history or {})
+        self._area_of = {}
+
+    def in_window(self, area, from_sha, to_sha):
+        """`{key: earliest commit}` for the area's commit-attributed pull requests in `(from_sha, to_sha]`."""
+        if not self.enabled:
+            return {}
+        rows = window.first_parent_prs(self.repo_dir, f"{from_sha}..{to_sha}", **self.history)
+        return self._select(rows, area, start=from_sha, end=to_sha)
+
+    def through(self, area, upto):
+        """The same over all first-parent history through `upto`, to place a roadmap's first window."""
+        if not self.enabled:
+            return {}
+        rows = window.first_parent_prs(self.repo_dir, upto, **self.history)
+        return self._select(rows, area, start=None, end=upto)
+
+    def _select(self, rows, area, *, start, end):
+        groups = {}
+        for sha, key in rows:
+            if isinstance(key, str):
+                groups.setdefault(key, []).append(sha)
+        pending = {key: shas for key, shas in groups.items() if key not in self._area_of}
+        if pending:
+            self._classify(pending, rows, start, end)
+        # Rows are newest first, so each group ends with its earliest commit.
+        return {key: shas[-1] for key, shas in groups.items() if self._area_of[key] == area}
+
+    def _classify(self, groups, rows, start, end):
+        # The queue lands a split pull request as consecutive commits, which can cross either end of
+        # the range. Reading the rest of that run makes every window classify it the same way.
+        if rows:
+            oldest_sha, oldest_key = rows[-1]
+            if start is not None and oldest_key in groups and window.first_parent_before(
+                    self.repo_dir, oldest_sha) == window.immutable_revision(self.repo_dir, start):
+                groups[oldest_key] = groups[oldest_key] + self._run(oldest_key, self._before(start))
+            newest_sha, newest_key = rows[0]
+            if self.tip and newest_key in groups and newest_sha == window.immutable_revision(self.repo_dir, end):
+                groups[newest_key] = self._run(newest_key, self._after(end)) + groups[newest_key]
+        commits = read_commits(self.repo_dir, [sha for shas in groups.values() for sha in shas])
+        classify = _labeller().classify
+        for key, shas in groups.items():
+            paths = sorted({path for sha in shas for path in commits[sha][2]})
+            labels = {classify(commits[sha][0], commits[sha][1], paths, self.areas) for sha in shas}
+            label = labels.pop() if len(labels) == 1 else ""
+            area = label[len(LABEL_PREFIX):] if label.startswith(LABEL_PREFIX) else None
+            self._area_of[key] = area if area in self.areas else None
+
+    def _before(self, start):
+        return window.git(["rev-list", "--first-parent", f"--max-count={MAX_SPLIT}", start, "--"],
+                          self.repo_dir).split()
+
+    def _after(self, end):
+        shas = window.git(["rev-list", "--first-parent", "--reverse", f"{end}..{self.tip}", "--"],
+                          self.repo_dir).split()[:MAX_SPLIT]
+        if shas and window.first_parent_before(self.repo_dir, shas[0]) != window.immutable_revision(self.repo_dir, end):
+            return []
+        return shas
+
+    def _run(self, key, shas):
+        """The leading commits of `shas` that cite `key`, in the same order. Anything else ends the run,
+        including a commit whose citation does not parse: it lies outside the reported range."""
+        commits = read_commits(self.repo_dir, shas)
+        overrides = (self.history.get("migration") or window.current_migration()).commits
+        run = []
+        for sha in shas:
+            try:
+                subject, body, _paths = commits[sha]
+                citation = (overrides[sha] if sha in overrides
+                            else commit_source(f"{subject}\n\n{body}" if body else subject))
+            except ProvenanceError:
+                break
+            if citation is None or citation.key != key:
+                break
+            run.append(sha)
+        return run
