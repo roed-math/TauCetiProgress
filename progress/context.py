@@ -162,7 +162,7 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
         doc = f" -- {d['doc']}" if d["doc"] else ""
         url = f" <{d['url']}>" if d.get("url") else ""
         state = "" if d.get("new") else " [revised, not new]"
-        body.append(f"- `{d['name']}` ({d['kind']}, {PROJECT_NAME}#{d['pr']}, {d['file']}){state}{doc}{url}")
+        body.append(f"- `{d['name']}` ({d['kind']}, {files.pr_reference(d['pr'], PROJECT_NAME)}, {d['file']}){state}{doc}{url}")
 
     body += [
         "",
@@ -175,13 +175,13 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
     ]
     for pr in with_bodies:
         body.append("")
-        body.append(f"### {PROJECT_NAME}#{pr['number']}: {pr['title'][:MAX_TITLE_CHARS]}")
+        body.append(f"### {files.pr_reference(pr['number'], PROJECT_NAME)}: {pr['title'][:MAX_TITLE_CHARS]}")
         text = sanitize_untrusted(pr.get("body") or "")[:MAX_BODY_CHARS]
         body.append(f"{FENCE}\n{text}\n{FENCE_END}" if text else "(no description)")
 
     if without:
         body += ["", "### Remaining pull requests in this window (titles only)", ""]
         for pr in without:
-            body.append(f"- {PROJECT_NAME}#{pr['number']}: {pr['title'][:MAX_TITLE_CHARS]}")
+            body.append(f"- {files.pr_reference(pr['number'], PROJECT_NAME)}: {pr['title'][:MAX_TITLE_CHARS]}")
 
     return "\n".join(intro + body) + "\n"

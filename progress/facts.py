@@ -21,9 +21,12 @@ import os
 
 import re
 
+from . import files as files_mod
 from . import window
 
 LEAN_PREFIX = os.environ.get("TAUCETI_LEAN_ROOT", "TauCeti").replace(".", "/") + "/"
+# How the prompts cite a report-repository pull request (`TauCeti#1234`); see `cli.cmd_prompt`.
+CONTENT_NAME = os.environ.get("TAUCETI_CONTENT_NAME", "TauCeti")
 LEAN_SUFFIX = ".lean"
 
 # Per-PR caps. A single PR adding hundreds of declarations is real (a big port), but a report does
@@ -214,7 +217,7 @@ def collect(repo_dir, from_sha, to_sha, pr_numbers=None, docs=None, documentatio
         names = sorted(per_pr.get(number, []))
         keep = names[:MAX_DECLS_PER_PR]
         dropped += len(names) - len(keep)
-        prs.append({"number": number, "declarations": keep,
+        prs.append({"number": number, "cite": files_mod.pr_reference(number, CONTENT_NAME), "declarations": keep,
                     "truncated_declarations": len(names) - len(keep)})
 
     # Documented declarations first: one is more likely to be a result worth naming than an

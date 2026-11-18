@@ -144,8 +144,11 @@ def _require_keys(obj, allowed, marker):
 
 
 def _require_pr_numbers(value):
-    """`prs` must be a list of positive integers, verbatim.
+    """`prs` must be a list of positive integers or canonical qualified citations, verbatim.
 
+    An integer is a pull request of the report repository. One from a commit-attributed source
+    (`provenance.commit_sources`) has no number there and is recorded as its `PullSource.key`, the
+    one spelling that parses back to itself, so a pull request cannot appear twice under two names.
     `int()` coercion accepted floats, bools and numeric strings, so a header could record `[true]`
     or `["1"]` and still parse. The list is what stops a pull request being reported twice, so it is
     validated rather than coerced.
@@ -154,12 +157,54 @@ def _require_pr_numbers(value):
         raise FormatError(f"prs must be a non-empty list, got {value!r}")
     out = []
     for n in value:
-        if isinstance(n, bool) or not isinstance(n, int) or n <= 0:
+        if isinstance(n, str):
+            if not _QUALIFIED_PR_RE.match(n) or _citation_key(n) != n:
+                raise FormatError(f"prs must contain positive integers or canonical qualified citations, got {n!r}")
+        elif isinstance(n, bool) or not isinstance(n, int) or n <= 0:
             raise FormatError(f"prs must contain positive integers, got {n!r}")
         out.append(n)
     if len(set(out)) != len(out):
         raise FormatError(f"prs contains duplicates: {value!r}")
     return out
+
+
+# The header is written unescaped inside an HTML comment, so a citation is held to the characters a
+# canonical key can contain: no `<`, `>`, whitespace or quotes, whatever the URL parser tolerates.
+_QUALIFIED_PR_RE = re.compile(
+    r"\A(?:github|forgejo):https?://[a-z0-9.\[\]:-]{1,253}/[a-z0-9_.-]{1,100}/[a-z0-9_.-]{1,100}"
+    r"(?:@[1-9][0-9]{0,18})?#[1-9][0-9]{0,18}\Z"
+)
+
+
+def _citation_key(value):
+    from .provenance import ProvenanceError, PullSource
+
+    try:
+        return PullSource.parse(value).key
+    except ProvenanceError:
+        return None
+
+
+def pr_sort_key(number):
+    """Report numbers first, then qualified citations; the two kinds never compare directly."""
+    return (isinstance(number, str), number)
+
+
+def sorted_prs(prs):
+    return sorted(set(prs), key=pr_sort_key)
+
+
+def pr_reference(number, prefix):
+    """How a reader is shown a pull request: `prefix#N` for a report number, else its web page.
+
+    A qualified pull request cannot be written `prefix#N`: that names the report repository's PR N.
+    """
+    if isinstance(number, str):
+        from .provenance import PullSource
+
+        citation = PullSource.parse(number)
+        return citation.repository.pull_url(citation.number)
+    return f"{prefix}#{number}"
 
 
 def _require_area(value, field):
@@ -400,9 +445,10 @@ def render_section(area, from_sha, to_sha, prs, window_label, body):
     to report a PR twice even if its `roadmap/<Area>` label is changed after the fact -- labels are
     mutable metadata, and re-attribution must not silently double-count or drop work.
     """
-    nums = sorted({int(n) for n in prs})
+    nums = sorted_prs(n if isinstance(n, str) and n.startswith(("github:", "forgejo:")) else int(n) for n in prs)
     if not nums:
         raise FormatError("a progress section must record at least one PR")
+    _require_pr_numbers(nums)
     header = json.dumps(
         {
             "roadmap": _require_area(area, "roadmap"),

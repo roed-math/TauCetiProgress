@@ -77,7 +77,8 @@ Rules:
   plausible and resolve to nothing.
 - **An entry with no URL cannot be linked.** It is either private or was renamed away later in the
   window. Name it in prose if it matters and leave it unlinked.
-- **Cite pull requests sparingly**, as `TauCeti#1234`, never as links. A documentation link tells a
+- **Cite pull requests sparingly**, as the context names them (`TauCeti#1234`, or a web address for one
+  merged from another forge), never as Markdown links. A documentation link tells a
   reader what a result is; a pull request number only says where it was written. Use at most two in
   the whole snapshot, and only when that history adds something the documentation link does not.
 

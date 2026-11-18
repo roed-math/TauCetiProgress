@@ -77,12 +77,12 @@ def pr_title(plan):
 
 def pr_body(plan, section_header, version=None):
     """The PR description: what this covers, and enough metadata to audit it."""
-    prs = ", ".join(f"{gh.CODE_REPO}#{n}" for n in sorted(plan["prs"]))
+    prs = ", ".join(files.pr_reference(n, gh.CODE_REPO) for n in files.sorted_prs(plan["prs"]))
     meta = {
         "roadmap": plan["roadmap"],
         "from_sha": plan["from_sha"],
         "to_sha": plan["to_sha"],
-        "prs": sorted(plan["prs"]),
+        "prs": files.sorted_prs(plan["prs"]),
         "version": version,
     }
     if "history_migration_sha256" in plan:
@@ -283,7 +283,7 @@ def superseded_prs(open_prs, area, live_cursor, plan_cursor, keep_branch, owners
         if not meta or meta.get("from_sha") != live_cursor:
             continue
         try:
-            theirs = {int(n) for n in (meta.get("prs") or [])}
+            theirs = {n if isinstance(n, str) else int(n) for n in (meta.get("prs") or [])}
         except (TypeError, ValueError):
             continue
         if theirs < ours:
@@ -542,7 +542,7 @@ def run(plan, status_body_file, section_body_file, roadmap_dir, dry_run=False, v
         try:
             header = files.validate_update(plan["roadmap"], old_status, status_text, old_progress,
                                            progress_text, expect_from_sha=plan["from_sha"])
-            if header["to_sha"] != plan["to_sha"] or header["prs"] != sorted(set(plan["prs"])):
+            if header["to_sha"] != plan["to_sha"] or header["prs"] != files.sorted_prs(plan["prs"]):
                 raise files.FormatError("saved branch window differs from the plan")
         except (files.FormatError, TypeError) as exc:
             print(f"retained progress branch cannot publish ({exc}); preserving it for recovery")

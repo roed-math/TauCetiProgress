@@ -13,7 +13,10 @@ Source-PR: forgejo:https://forge.example/team/Math#7
 ```
 
 The forge kind, origin and repository name remain part of the citation. PR 7 on
-GitHub and PR 7 on two Forgejo origins are three different objects. Only complete
+GitHub and PR 7 on two Forgejo origins are three different objects. A queue may
+also name the repository's native ID, `forgejo:https://forge.example/team/Math@3#7`;
+the ID is then part of the citation, so a recreated repository of the same name
+is a different source. Only complete
 trailers matching the queue's grammar count; prose and empty or lookalike fields
 are ignored. Malformed or conflicting recognized citations, or disagreement with
 the subject number, abort the read.
@@ -26,6 +29,30 @@ current-repository numbers only after checking the origin or applying that map.
 An unqualified historical subject needs an explicit legacy namespace when the
 report repository is native. Foreign citations without a matching map refuse;
 they never become matching current PR numbers by coincidence.
+
+## Commit-attributed sources
+
+A second forge can land pull requests on the same mainline while the report
+repository keeps merging its own. Tau Ceti's Forgejo queue has done so beside
+Bors since 2026-11-15. Those pull requests have no report number and no
+`roadmap/<Area>` label, so `TAUCETI_PROGRESS_COMMIT_SOURCES` names the
+repositories whose citations are kept instead of refused: whitespace-separated
+qualified repositories with their native IDs, by default
+`forgejo:https://git.taucetiproject.org/TauCetiProject/TauCeti@1`, and empty to
+disable. Each such pull request is identified everywhere by its canonical
+`PullSource.key` string. That includes plans, facts and the `prs` list of a
+`PROGRESS.md` section, where it sorts after the report repository's integers.
+Readers are shown its web page rather than `TauCeti#N`.
+
+`commit_attribution` decides its roadmap with the labeller's own `classify`,
+loaded from the pinned TauCetiTools. It reads the commit message without its
+subject paragraph as the description, and the commit's first-parent paths as
+the diff. A pull request the queue landed as several commits is classified on
+the union of their paths, once per message, and counts only if every message
+agrees. `roadmap/none` and `roadmap/Unknown` count for no roadmap, as those
+labels do. Its earliest commit competes with the labelled merges to start a
+roadmap's first window. Classification needs no forge read: the whole mainline
+takes about a second, with rename detection off.
 
 `MigrationMap.parse()` accepts this versioned, one-to-one correspondence:
 

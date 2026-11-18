@@ -21,7 +21,8 @@ from functools import wraps
 from tauceti_tools.forge import GITHUB, RepositoryRef
 
 from . import git_history
-from .provenance import MigrationMap, ProvenanceError, configured_migration, resolve_source, subject_number
+from .provenance import (MigrationMap, ProvenanceError, commit_sources, configured_migration, resolve_source,
+                         subject_number)
 
 _HISTORY_ROUND = ContextVar("progress_history_round", default=None)
 _MIGRATION = ContextVar("progress_history_migration", default=None)
@@ -248,7 +249,11 @@ def _sources(rows, legacy_repository, migration=None, *, include_uncited=False, 
 
 def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=None, legacy_through=None,
                      migration=None, include_uncited=False):
-    """Current-source numbers only after origin checking or an explicit import map."""
+    """Current-source numbers only after origin checking or an explicit import map.
+
+    A citation from a commit-attributed source (`provenance.commit_sources`) has no report number;
+    it is returned as its qualified key, a string, and never collides with an integer.
+    """
     if repository is None:
         from .gh import CODE_REPO
         try:
@@ -262,6 +267,10 @@ def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=N
     migration = migration if migration is not None else current_migration()
     if not isinstance(migration, MigrationMap):
         raise GitError("report migration must be an explicit source map")
+    try:
+        sources = commit_sources()
+    except ProvenanceError as error:
+        raise GitError(str(error)) from None
     out = []
     seen = {}
     for sha, citation in first_parent_sources(repo_dir, revision, repository=repository,
@@ -271,7 +280,12 @@ def first_parent_prs(repo_dir, revision, *, repository=None, legacy_repository=N
             out.append((sha, None))
             continue
         try:
-            number = migration.number(citation, repository)
+            try:
+                number = migration.number(citation, repository)
+            except ProvenanceError:
+                if (citation.repository.key, citation.native_id) not in sources:
+                    raise
+                number = citation.key
             if number in seen and seen[number] != citation:
                 raise ProvenanceError("distinct source citations map to the same report PR number")
             seen[number] = citation

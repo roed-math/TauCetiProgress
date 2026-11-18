@@ -63,7 +63,8 @@ reader should get to the end.
   yourself: they're computed from the module path and the full name, and checked against the
   published documentation, so one you assemble will look right and go nowhere. An entry with no URL
   is private, or was renamed later in the window. Name it in prose and leave it unlinked.
-- **Cite pull requests sparingly**, as `TauCeti#1234`, never as a link. A documentation link tells a
+- **Cite pull requests sparingly**, each as the `cite` the facts file gives it (`TauCeti#1234`, or a
+  web address for one merged from another forge), never as a Markdown link. A documentation link tells a
   reader what a result is, which is what they came for. A pull request number only tells them where
   it was written. One or two for the headline result, and none for anything you've already linked.
 - Group by mathematics, not by pull request. Several pull requests that built one theorem are one
@@ -104,7 +105,8 @@ Use exactly two `##` sections, with these headings and this shape:
     now provides it, say so.
 
 Put one mathematical idea in each entry: plain language first, references last. Copy documentation
-URLs exactly; never build one. Cite pull requests sparingly as `TauCeti#1234`, never as links: use at
+URLs exactly; never build one. Cite pull requests sparingly by their `cite` from the facts file
+(`TauCeti#1234`, or a web address), never as Markdown links: use at
 most two in the whole snapshot, and only when the history adds something the documentation link does
 not. Do not catalogue every declaration, repeat the README's exposition, turn every roadmap layer
 into a heading, or narrate the development process.
