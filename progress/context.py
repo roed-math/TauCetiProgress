@@ -49,10 +49,22 @@ def sanitize_untrusted(text):
     return out.strip()
 
 
+def _cites(repository, number, content):
+    """Whether commentary from `repository` is that of the plan's pull request `number`: the content
+    repository's for a number, the cited one for a commit-attributed key, whose name is lowercased."""
+    if isinstance(number, int):
+        return repository == content
+    from .provenance import PullSource
+
+    citation = PullSource.parse(number)
+    return (repository.repository.key, repository.native_id) == (citation.repository.key, citation.native_id)
+
+
 def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_bodies=MAX_BODIES):
     """The context block for one window, as text.
 
-    `pr_details` is `[{number,title,body,url,merged_at}]`, newest first.
+    `pr_details` is `[{number,title,body,url,merged_at}]`, newest first: the report repository's
+    from `pr_details`, commit-attributed ones from `commit_attribution.commentary`.
     """
     if "source" in plan or "source" in fact_data:
         from tauceti_tools.ci_candidate import RepositoryIdentity
@@ -78,13 +90,12 @@ def render(plan, fact_data, pr_details, max_declarations=MAX_DECLARATIONS, max_b
             factual = [row["number"] for row in fact_data["prs"]]
             commentary = [row["number"] for row in pr_details]
             for observed in (numbers, factual, commentary):
-                if any(type(number) is not int or number < 1 for number in observed) \
-                        or len(set(observed)) != len(observed) or set(observed) != set(numbers):
+                if set(files.require_pr_numbers(observed)) != set(numbers):
                     raise ValueError("facts or commentary PRs differ from plan")
-            expected = RepositoryIdentity.parse(source["content"])
+            content = RepositoryIdentity.parse(source["content"])
             for row in pr_details:
                 actual = RepositoryIdentity.parse(row.get("repository"))
-                if actual != expected or row.get("number") not in plan["prs"]:
+                if row.get("number") not in plan["prs"] or not _cites(actual, row["number"], content):
                     raise ValueError("PR commentary belongs to another source or window")
         except (ValueError, TypeError, KeyError):
             raise ReplanRequired("writing context source binding mismatch; preserve prepared artifacts") from None

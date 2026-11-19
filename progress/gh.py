@@ -411,6 +411,8 @@ def pr_details(numbers, repo=CODE_REPO):
     """
     out = []
     for n in numbers:
+        if isinstance(n, str) and not n.isdecimal():
+            raise ValueError(f"{n} is commit-attributed: use commit_attribution.commentary")
         raw = _api(f"repos/{repo}/pulls/{int(n)}")
         obj = json.loads(raw)
         out.append(

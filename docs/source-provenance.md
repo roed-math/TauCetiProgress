@@ -211,7 +211,10 @@ pin upgrade, mechanically regenerate facts for unfinished windows under the new
 version and retain existing paid prose for inspection; do not silently reuse old
 facts as if calculated by the new version. Qualified writer context requires the
 same plan/facts source binding, window endpoints, documentation pin and PR set,
-plus complete, non-duplicated qualified commentary from its content repository.
+plus complete, non-duplicated qualified commentary, each row from the repository
+its pull request cites: the content repository's own through `pr_details`, a
+commit-attributed one through `commit_attribution.commentary`, which reads its
+merged commit message and asks no forge.
 
 The command-line entry points still use the legacy bootstrap and reject native
 project configurations. Apply also refuses qualified saved plans before any

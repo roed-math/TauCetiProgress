@@ -9,10 +9,11 @@ label the pull request would have received, read from Git alone.
 
 import functools
 import os
+import re
 import subprocess
 
 from . import git_history, window
-from .provenance import ProvenanceError, commit_source, commit_sources
+from .provenance import ProvenanceError, PullSource, commit_source, commit_sources
 
 LABEL_PREFIX = "roadmap/"
 CHUNK = 500
@@ -84,6 +85,42 @@ def read_message(repo_dir, sha):
         detail = proc.stderr.decode("utf-8", errors="replace").strip()[-4096:]
         raise window.GitError(f"git could not read commit {sha[:12]}: {detail or proc.returncode}")
     return proc.stdout.decode("utf-8")
+
+
+def commentary(repo_dir, from_sha, to_sha, keys, **history):
+    """`pr_details`-shaped rows for commit-attributed pull requests in `(from_sha, to_sha]`, newest first.
+
+    A pull request's commentary is its merged commit message, the description its roadmap was read
+    from, so no forge is asked. `history` is the window's (`history_options_from_record` for a
+    native plan). Each row names the repository the key cites; the report repository's own pull
+    requests come from `pr_details`.
+    """
+    wanted = list(dict.fromkeys(keys))
+    if any(not isinstance(key, str) for key in wanted):
+        raise ValueError("commentary reads commit-attributed pull requests only")
+    landed = {}
+    for sha, key in window.first_parent_prs(repo_dir, f"{from_sha}..{to_sha}", **history):
+        if key in wanted:
+            landed.setdefault(key, []).append(sha)
+    missing = [key for key in wanted if key not in landed]
+    if missing:
+        raise window.GitError(f"{missing[0]} did not land in {from_sha[:12]}..{to_sha[:12]}")
+    from tauceti_tools.ci_candidate import RepositoryIdentity
+
+    rows = []
+    for key, shas in landed.items():
+        citation = PullSource.parse(key)
+        subject, _, body = read_message(repo_dir, shas[-1]).partition("\n\n")
+        title = re.sub(rf"\s*\(#{citation.number}\)\Z", "", " ".join(subject.split()))
+        rows.append({
+            "number": key,
+            "title": title,
+            "body": body.strip(),
+            "merged_at": window.commit_date(repo_dir, shas[0]),
+            "url": citation.repository.pull_url(citation.number),
+            "repository": RepositoryIdentity(citation.repository, citation.native_id).record(),
+        })
+    return rows
 
 
 class Attribution:

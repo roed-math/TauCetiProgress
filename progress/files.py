@@ -143,7 +143,7 @@ def _require_keys(obj, allowed, marker):
     return obj
 
 
-def _require_pr_numbers(value):
+def require_pr_numbers(value):
     """`prs` must be a list of positive integers or canonical qualified citations, verbatim.
 
     An integer is a pull request of the report repository. One from a commit-attributed source
@@ -448,7 +448,7 @@ def render_section(area, from_sha, to_sha, prs, window_label, body):
     nums = sorted_prs(n if isinstance(n, str) and n.startswith(("github:", "forgejo:")) else int(n) for n in prs)
     if not nums:
         raise FormatError("a progress section must record at least one PR")
-    _require_pr_numbers(nums)
+    require_pr_numbers(nums)
     header = json.dumps(
         {
             "roadmap": _require_area(area, "roadmap"),
@@ -490,7 +490,7 @@ def parse_sections(text):
                 "roadmap": _require_area(h.get("roadmap"), "roadmap"),
                 "from_sha": _require_sha(h.get("from_sha"), "from_sha"),
                 "to_sha": _require_sha(h.get("to_sha"), "to_sha"),
-                "prs": _require_pr_numbers(h.get("prs")),
+                "prs": require_pr_numbers(h.get("prs")),
             }
         )
     return out

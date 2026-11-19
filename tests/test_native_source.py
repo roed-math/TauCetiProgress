@@ -614,6 +614,44 @@ class NativePlanning(unittest.TestCase):
             with self.assertRaises(ReplanRequired):
                 context.render(p, facts_record, details)
 
+    def test_a_configured_foreign_contribution_is_planned_collected_and_given_commentary(self):
+        from progress import commit_attribution
+        from progress.provenance import COMMIT_SOURCES_ENV
+
+        old = f"forgejo:{self.forge.url}/team/Code@10"  # the content repository's predecessor
+        self.commit("Native proof (#7)\n\nSource-PR: " + self.content.repository.key + "#7", "docs/seven.md")
+        sha = self.commit(f"feat: old work (#31)\n\nRoadmap: Area\nSource-PR: {old}#31", "TauCeti/A.lean")
+        key = PullSource.parse(f"{old}#31").key
+        self.closed = [{**self.row(7), "title": "Native proof", "body": "Native body"}]
+        roadmap = self.root / "roadmap"
+        (roadmap / "TauCetiRoadmap/Area").mkdir(parents=True)
+        (roadmap / "TauCetiRoadmap/Area/README.md").write_text("# Area\n")
+        docs = self.docs(sha)
+        with patch.dict(os.environ, {COMMIT_SOURCES_ENV: old}), \
+                patch.object(gh, "gh", side_effect=AssertionError("native work must not fall back to gh")):
+            result = plan.build_plan(roadmap, self.code, source=self.source, ref="main", min_prs=1, docs=docs)
+            collected = facts.collect(self.code, result["from_sha"], sha, pr_numbers=result["prs"], docs=docs,
+                                      source_record=result["source"])
+            history = history_options_from_record(result["source"])
+            details = self.content.pr_details([7]) + commit_attribution.commentary(
+                self.code, result["from_sha"], result["to_sha"], [key], **history)
+        self.assertEqual(result["prs"], [key, 7])
+        self.assertEqual([(d["name"], d["pr"]) for d in collected["declarations"]], [("alpha", key)])
+        self.assertEqual((details[1]["title"], details[1]["repository"]["id"]), ("feat: old work", 10))
+        text = context.render(result, collected, details)
+        self.assertIn(f"### {files.pr_reference(key, 'TauCeti')}: feat: old work", text)
+        self.assertIn("Native body", text)
+        named = {**details[1], "repository": {**details[1]["repository"], "name": "team/Code"}}
+        self.assertEqual(context.render(result, collected, [details[0], named]), text)
+        # Each row must come from the repository its pull request cites.
+        for wrong in ({**details[1], "repository": self.content.identity.record()},
+                      {**details[0], "repository": details[1]["repository"]}):
+            rows = [wrong, details[1]] if wrong["number"] == 7 else [details[0], wrong]
+            with self.assertRaises(ReplanRequired):
+                context.render(result, collected, rows)
+        with self.assertRaisesRegex(ValueError, "commit-attributed"):
+            self.content.pr_details([key])
+
     def test_native_in_flight_ownership_uses_ids_not_reused_logins(self):
         actor = {"login": "operator", "id": self.forge.key + "/users/21"}
         head = {"forge": {"kind": "forgejo", "url": self.forge.url}, "name": "operator/Roadmap", "id": 88}

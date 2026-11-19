@@ -165,6 +165,8 @@ class NativeRepository:
         self._check_binding()
         result = []
         for number in numbers:
+            if isinstance(number, str):
+                raise ValueError(f"{number} is commit-attributed: use commit_attribution.commentary")
             _number(number, "PR number")
             row = self.api.pull(self.repository, number)
             if "body" not in row:
