@@ -19,7 +19,8 @@ the ID is then part of the citation, so a recreated repository of the same name
 is a different source. A cited ID numbers a report-repository pull request only
 when it equals that repository's own (`repository_id`, carried by native source
 bindings); otherwise the citation is foreign, and a migration between the two
-same-name repositories is allowed. A citation without an ID matches by URL.
+same-name repositories is allowed. A citation without an ID matches by URL,
+unless a migration maps it into the report repository; the mapping then wins.
 Only complete
 trailers matching the queue's grammar count; prose and empty or lookalike fields
 are ignored. Malformed or conflicting recognized citations, or disagreement with
@@ -61,7 +62,8 @@ Only the history a report needs is read, through `commit_attribution.Attribution
 first-parent history through the documented commit, where its earliest
 commit-attributed pull request competes with the labelled merges to start the
 first window. A pull request split across a window boundary is read across up to
-32 consecutive commits on either side, so neighbouring windows classify it alike.
+32 consecutive commits on either side, so neighbouring windows classify it alike;
+the first commit citing anything else ends that read, and only its message is read.
 Provenance errors outside those reads cannot stop a report, and an unreported
 area that only commit attribution could start is set aside when its history is
 unreadable. Disabled, nothing extra is read. The merge collector computes a first

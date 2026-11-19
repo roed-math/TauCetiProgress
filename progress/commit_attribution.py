@@ -72,6 +72,20 @@ def read_commits(repo_dir, shas):
     return found
 
 
+def read_message(repo_dir, sha):
+    """`sha`'s message without its changed paths. Raises `UnicodeError` if it is not UTF-8."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo_dir), "log", "-1", "--no-show-signature", "--encoding=UTF-8", "--format=%B",
+         "--end-of-options", sha, "--"],
+        capture_output=True,
+        env=git_history.environment(history=True),
+    )
+    if proc.returncode:
+        detail = proc.stderr.decode("utf-8", errors="replace").strip()[-4096:]
+        raise window.GitError(f"git could not read commit {sha[:12]}: {detail or proc.returncode}")
+    return proc.stdout.decode("utf-8")
+
+
 class Attribution:
     """Commit attribution for one planning round, read from `first_parent_prs` rows.
 
@@ -147,16 +161,14 @@ class Attribution:
 
     def _run(self, key, shas):
         """The leading commits of `shas` that cite `key`, in the same order. Anything else ends the run,
-        including a commit whose citation does not parse: it lies outside the reported range."""
-        commits = read_commits(self.repo_dir, shas)
+        including a commit whose message does not parse or decode: it lies outside the reported range,
+        so only its message is read, one commit at a time."""
         overrides = (self.history.get("migration") or window.current_migration()).commits
         run = []
         for sha in shas:
             try:
-                subject, body, _paths = commits[sha]
-                citation = (overrides[sha] if sha in overrides
-                            else commit_source(f"{subject}\n\n{body}" if body else subject))
-            except ProvenanceError:
+                citation = overrides[sha] if sha in overrides else commit_source(read_message(self.repo_dir, sha))
+            except (ProvenanceError, UnicodeError):
                 break
             if citation is None or citation.key != key:
                 break

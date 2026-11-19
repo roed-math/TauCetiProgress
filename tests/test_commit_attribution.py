@@ -23,6 +23,12 @@ _spec.loader.exec_module(collect)
 SOURCE = "forgejo:https://forge.example/team/Math@7"
 
 
+# A native source binding whose content repository has ID 8.
+RECORD = {"schema": "tauceti-progress.source/v1", "legacy_content": None, "legacy_through": None,
+          "content": {"forge": {"kind": "forgejo", "url": "https://forge.example"}, "name": "team/Math", "id": 8},
+          "roadmap": {"forge": {"kind": "forgejo", "url": "https://forge.example"}, "name": "team/Map", "id": 9}}
+
+
 def key(number):
     return PullSource.parse(f"{SOURCE}#{number}").key
 
@@ -203,10 +209,7 @@ class CommitAttribution(unittest.TestCase):
         from progress.native_source import history_options_from_record
         from progress.provenance import MigrationMap
 
-        record = {"schema": "tauceti-progress.source/v1", "legacy_content": None, "legacy_through": None,
-                  "content": {"forge": {"kind": "forgejo", "url": "https://forge.example"}, "name": "team/Math", "id": 8},
-                  "roadmap": {"forge": {"kind": "forgejo", "url": "https://forge.example"}, "name": "team/Map", "id": 9}}
-        history = history_options_from_record(record)
+        history = history_options_from_record(RECORD)
         self.assertEqual(history["repository_id"], 8)
         ours = self.commit(f"feat: ours (#40)\n\nSource-PR: forgejo:https://forge.example/team/Math@8#40", ["TauCeti/O.lean"])
         tip = self.commit(forgejo(31, "Curves"), ["TauCeti/P.lean"])  # the predecessor, ID 7
@@ -219,6 +222,51 @@ class CommitAttribution(unittest.TestCase):
             self.assertEqual(window.window_prs(self.code, self.initial, tip, **history, migration=mapping), [103, 40])
         self.assertEqual(window.window_prs(self.code, self.initial, tip, **history), [key(31), 40])
 
+
+    def test_an_explicit_migration_outranks_a_match_by_url_alone(self):
+        from progress.native_source import history_options_from_record
+        from progress.provenance import MigrationMap
+
+        history = history_options_from_record(RECORD)
+        tip = self.commit("feat: old (#31)\n\nSource-PR: forgejo:https://forge.example/team/Math#31", ["TauCeti/P.lean"])
+        mapping = MigrationMap.parse({"schema": "tauceti-progress.migration/v1", "mappings": [
+            {"from": "forgejo:https://forge.example/team/Math#31", "to": "forgejo:https://forge.example/team/Math@8#103"}]})
+        with patch.dict(os.environ, {COMMIT_SOURCES_ENV: ""}):
+            self.assertEqual(window.window_prs(self.code, self.initial, tip, **history), [31])
+            self.assertEqual(window.window_prs(self.code, self.initial, tip, **history, migration=mapping), [103])
+
+    def test_a_tree_finds_the_roadmaps_a_checkout_does_under_nested_directories(self):
+        for areas_dir, completed_dir in (("TauCetiRoadmap", "Completed"), ("docs/roadmaps", "docs/done"),
+                                         ("docs/roadmaps", "Completed"), ("absent/roadmaps", "Completed")):
+            with tempfile.TemporaryDirectory() as root, patch.object(plan, "AREAS_DIR", areas_dir), \
+                    patch.object(plan, "COMPLETED_DIR", completed_dir):
+                for path in ("docs/roadmaps/Curves/README.md", "docs/roadmaps/Curves/Sub/README.md",
+                             "docs/roadmaps/README.md", "docs/roadmaps/Bare/Suggested.lean",
+                             "TauCetiRoadmap/Surfaces/README.md", "docs/done/Old/README.md",
+                             "Completed/Gone/README.md", "Top/README.md"):
+                    (pathlib.Path(root) / path).parent.mkdir(parents=True, exist_ok=True)
+                    (pathlib.Path(root) / path).write_text("# x\n")
+                paths = [p.relative_to(root).as_posix() for p in pathlib.Path(root).rglob("*") if p.is_file()]
+                found = plan.discover_areas(root)
+                self.assertTrue(found, areas_dir)
+                self.assertEqual(plan.areas_from_paths(paths), found, (areas_dir, completed_dir))
+
+    def test_history_past_a_split_run_is_never_decoded(self):
+        # An old commit adding a path that is not UTF-8, staged through the index since the
+        # filesystem may refuse the name; skip-worktree keeps later `add -A` from deleting it.
+        blob = subprocess.run(["git", "-C", str(self.code), "hash-object", "-w", "--stdin"], input=b"x\n",
+                              check=True, capture_output=True).stdout.decode().strip()
+        bad = b"notes/\xff.txt"
+        for args in (["update-index", "--add", "--cacheinfo", f"100644,{blob},".encode() + bad],
+                     ["update-index", "--skip-worktree", bad]):
+            subprocess.run(["git", "-C", str(self.code), *args], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(self.code), "commit", "-q", "-m", "chore: old"], env=self.env, check=True,
+                       capture_output=True)
+        one = self.commit("feat: labelled (#1)", ["TauCeti/A.lean"])
+        self.commit(forgejo(31, "Curves"), ["TauCeti/C.lean"])
+        self.report("Curves", one)
+        got = self.plan({"Curves": [1]}, "Curves")
+        self.assertEqual((got["from_sha"], got["prs"]), (one, [key(31)]))
 
 def facts_commits(code, start, end, numbers):
     from progress import facts

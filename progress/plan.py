@@ -104,10 +104,10 @@ def areas_from_paths(paths):
     inner = any(path.startswith(AREAS_DIR + "/") for path in paths)
     found = {}
     for prefix in ((AREAS_DIR if inner else ""), COMPLETED_DIR):
-        depth = 3 if prefix else 2
+        lead = prefix + "/" if prefix else ""
         names = sorted(
-            parts[-2] for parts in (path.split("/") for path in paths)
-            if len(parts) == depth and parts[-1] == "README.md" and (not prefix or parts[0] == prefix)
+            parts[0] for parts in (path[len(lead):].split("/") for path in paths if path.startswith(lead))
+            if len(parts) == 2 and parts[1] == "README.md"
         )
         for name in names:
             found[name] = f"{prefix}/{name}" if prefix else name

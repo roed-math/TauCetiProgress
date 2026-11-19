@@ -229,12 +229,14 @@ class MigrationMap:
         return not self._mapping and not self.commits
 
     def number(self, citation, repository, repository_id=None):
+        # A mapping into the report repository wins: a citation without a native ID matches by URL
+        # alone, and may be mapped exactly because it predates the ID of a recreated repository.
+        mapped = self._mapping.get(citation)
+        if mapped is not None and same_source(mapped, repository, repository_id):
+            return mapped.number
         if same_source(citation, repository, repository_id):
             return citation.number
-        mapped = self._mapping.get(citation)
-        if mapped is None or not same_source(mapped, repository, repository_id):
-            raise ProvenanceError("foreign source citation needs an explicit migration to the report repository")
-        return mapped.number
+        raise ProvenanceError("foreign source citation needs an explicit migration to the report repository")
 
 
 def same_source(citation, repository, repository_id=None):
