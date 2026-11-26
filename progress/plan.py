@@ -604,6 +604,10 @@ def build_plan(
         if area in skip_areas:
             skip(area, f"{area}: skipped by the operator")
             continue
+        subs = len(read_sub_roadmaps(roadmap_dir, area, rel_dir))
+        if subs > files.MAX_SUB_ROADMAPS:
+            skip(area, f"{area}: {subs} sub-roadmaps; a report carries at most {files.MAX_SUB_ROADMAPS}")
+            continue
         if area in blocked:
             skip(area, f"{area}: PR #{blocked[area]['number']} is still open")
             continue

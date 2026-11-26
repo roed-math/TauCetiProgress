@@ -318,6 +318,34 @@ def test_a_skipped_area_is_never_chosen():
              window_mod.first_parent_commits, plan.files.reported_prs) = saved
 
 
+def test_an_area_with_more_sub_roadmaps_than_a_report_carries_is_never_chosen():
+    from progress import window as window_mod
+    repo, _areas = _setup([("Busy", "TauCetiRoadmap/Busy", 20.0), ("Old", "TauCetiRoadmap/Old", 30.0)])
+    saved = (plan.docs_source_commit, window_mod.head_sha, window_mod.is_ancestor, plan.area_window,
+             gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date,
+             window_mod.first_parent_commits, plan.files.reported_prs, plan.read_sub_roadmaps)
+    plan.docs_source_commit = lambda: "b" * 40
+    window_mod.head_sha = lambda *a, **k: "b" * 40
+    window_mod.is_ancestor = lambda *a, **k: True
+    plan.area_window = lambda code_dir, prs, f, t: list(prs)
+    gh.closed_prs_for_area = lambda area, repo=None: {1: None, 2: None, 3: None}
+    plan.read_area_files = lambda roadmap_dir, rel_dir: ("status", "log")
+    plan.files.cursor = lambda text: "a" * 40
+    window_mod.commit_date = lambda *a, **k: "2026-09-30T00:00:00+00:00"
+    window_mod.first_parent_commits = lambda *a, **k: []
+    plan.files.reported_prs = lambda text: set()
+    over = [{"roadmap": f"Old/S{i:02d}"} for i in range(plan.files.MAX_SUB_ROADMAPS + 1)]
+    plan.read_sub_roadmaps = lambda roadmap_dir, area, rel_dir: over if area == "Old" else []
+    try:
+        p = plan.build_plan(repo, repo, open_prs=[], now=NOW, strategy="threshold")
+        assert p["roadmap"] == "Busy", p["roadmap"]
+        assert any(s.startswith("Old: 33 sub-roadmaps") for s in p["skipped"]), p["skipped"]
+    finally:
+        (plan.docs_source_commit, window_mod.head_sha, window_mod.is_ancestor, plan.area_window,
+         gh.closed_prs_for_area, plan.read_area_files, plan.files.cursor, window_mod.commit_date,
+             window_mod.first_parent_commits, plan.files.reported_prs, plan.read_sub_roadmaps) = saved
+
+
 # ----- assessment_gap: what the Progress page shows as unassessed --------------------------------
 
 
